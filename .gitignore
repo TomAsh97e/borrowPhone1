@@ -1,0 +1,15 @@
+.hvigor/
+.test/
+.idea/
+.vscode/
+build/
+**/build/
+oh_modules/
+**/oh_modules/
+local.properties
+signatures/
+*.p12
+*.cer
+*.p7b
+*.csr
+*.jks

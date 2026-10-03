@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Temporary selected-photo viewer"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "BorrowPhone selected-photo viewer"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "BorrowPhone"
+    }
+  ]
+}

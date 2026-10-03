@@ -29,3 +29,16 @@ export function fitSize(width: number, height: number, maxEdge: number): Display
 export function clampIndex(index: number, count: number): number {
   return Math.max(0, Math.min(index, Math.max(0, count - 1)));
 }
+
+export function isValidPin(pin: string): boolean {
+  return /^\d{6}$/.test(pin);
+}
+
+export function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
+  let difference = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
+  }
+  return difference === 0;
+}

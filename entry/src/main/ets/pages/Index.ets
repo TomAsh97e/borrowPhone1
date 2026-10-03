@@ -1,18 +1,28 @@
+import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
-import { userAuth } from '@kit.UserAuthenticationKit';
-import { clampIndex, fitSize, hasValidSelection } from '../model/SessionRules';
+import { clampIndex, constantTimeEqual, fitSize, hasValidSelection, isValidPin } from '../model/SessionRules';
 
 const MAX_PHOTOS = 5;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_PIXELS = 50 * 1000 * 1000;
 const MAX_DISPLAY_EDGE = 1600;
 const OWNER_AUTHORIZATION_MS = 2 * 60 * 1000;
+const PIN_ITERATIONS = 100000;
+const PIN_MAX_FAILURES = 5;
+const PIN_LOCKOUT_MS = 30 * 1000;
+const PIN_PREFERENCES = 'owner_pin';
+const PIN_HASH_KEY = 'hash';
+const PIN_SALT_KEY = 'salt';
+const PIN_FAILURES_KEY = 'failures';
+const PIN_LOCK_UNTIL_KEY = 'lockUntil';
 
 enum Screen {
   LOCKED,
+  PIN_SETUP,
+  PIN_VERIFY,
   OWNER,
   REVIEW,
   GUEST
@@ -35,18 +45,31 @@ struct Index {
   @State private imageCount: number = 0;
   @State private imageIndex: number = 0;
   @State private ownerAuthenticated: boolean = false;
-  @State private guestRequiresAuth: boolean = false;
+  @State private pinLoaded: boolean = false;
+  @State private pinStorageReady: boolean = false;
+  @State private pinConfigured: boolean = false;
+  @State private pinInput: string = '';
+  @State private pinConfirmation: string = '';
 
   private pendingUris: string[] = [];
   private images: image.PixelMap[] = [];
   private operationId: number = 0;
-  private activeAuth: userAuth.UserAuthInstance | undefined = undefined;
   private ownerAuthorizationTimer: number = -1;
+  private pinPurpose: AuthPurpose = AuthPurpose.ENTER_OWNER;
+  private pinHash: Uint8Array = new Uint8Array();
+  private pinSalt: Uint8Array = new Uint8Array();
+  private pinFailures: number = 0;
+  private pinLockUntil: number = 0;
+  private pinPreferences: preferences.Preferences | undefined = undefined;
+
+  aboutToAppear(): void {
+    this.loadPin();
+  }
 
   aboutToDisappear(): void {
     this.operationId++;
     this.clearOwnerAuthorizationTimer();
-    this.cancelAuthentication();
+    this.clearPinInput();
     this.releaseImages();
   }
 
@@ -54,76 +77,158 @@ struct Index {
     this.lockAndClear('Session ended because BorrowPhone left the foreground.');
   }
 
-  private openViewerDemo(): void {
-    this.ownerAuthenticated = false;
-    this.screen = Screen.OWNER;
-    this.message = 'Viewer-only demo: owner authentication and whole-device confinement are not active.';
+  private async loadPin(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext();
+      if (context === undefined) {
+        throw new Error('Application context unavailable');
+      }
+      const store = await preferences.getPreferences(context, PIN_PREFERENCES);
+      const hash = await store.get(PIN_HASH_KEY, new Uint8Array());
+      const salt = await store.get(PIN_SALT_KEY, new Uint8Array());
+      const failures = await store.get(PIN_FAILURES_KEY, 0);
+      const lockUntil = await store.get(PIN_LOCK_UNTIL_KEY, 0);
+      if (!(hash instanceof Uint8Array) || !(salt instanceof Uint8Array) ||
+        typeof failures !== 'number' || typeof lockUntil !== 'number') {
+        throw new Error('Invalid PIN storage');
+      }
+      this.pinPreferences = store;
+      this.pinHash = hash;
+      this.pinSalt = salt;
+      this.pinFailures = failures;
+      this.pinLockUntil = lockUntil;
+      this.pinConfigured = hash.length > 0 && salt.length > 0;
+      this.pinStorageReady = true;
+    } catch (error) {
+      this.message = 'PIN storage is unavailable. Owner controls remain locked.';
+    } finally {
+      this.pinLoaded = true;
+    }
+  }
+
+  private derivePin(pin: string, salt: Uint8Array): Uint8Array {
+    const spec: cryptoFramework.PBKDF2Spec = {
+      algName: 'PBKDF2',
+      password: pin,
+      salt: salt,
+      iterations: PIN_ITERATIONS,
+      keySize: 32
+    };
+    return cryptoFramework.createKdf('PBKDF2|SHA256').generateSecretSync(spec).data;
   }
 
   private authenticate(purpose: AuthPurpose): void {
-    if (!this.privacyReady || this.busy) {
+    if (!this.privacyReady || this.busy || !this.pinLoaded || !this.pinStorageReady) {
       return;
     }
-
-    const attempt = ++this.operationId;
-    this.busy = true;
+    if (Date.now() < this.pinLockUntil) {
+      const seconds = Math.ceil((this.pinLockUntil - Date.now()) / 1000);
+      this.message = `Too many incorrect attempts. Try again in ${seconds} seconds.`;
+      return;
+    }
+    this.pinPurpose = purpose;
+    this.clearPinInput();
     this.message = '';
+    this.screen = this.pinConfigured ? Screen.PIN_VERIFY : Screen.PIN_SETUP;
+  }
 
+  private async createPin(): Promise<void> {
+    if (this.busy || !isValidPin(this.pinInput) || this.pinInput !== this.pinConfirmation ||
+      this.pinPreferences === undefined) {
+      this.message = 'Enter the same six-digit PIN twice.';
+      return;
+    }
+    this.busy = true;
     try {
-      userAuth.getAvailableStatus(userAuth.UserAuthType.PIN, userAuth.AuthTrustLevel.ATL3);
-      const auth = userAuth.getUserAuthInstance({
-        challenge: cryptoFramework.createRandom().generateRandomSync(16).data,
-        authType: [userAuth.UserAuthType.PIN],
-        authTrustLevel: userAuth.AuthTrustLevel.ATL3
-      }, {
-        title: purpose === AuthPurpose.ENTER_OWNER ? 'Open owner controls' : 'Return BorrowPhone to owner'
-      });
-      this.activeAuth = auth;
-      auth.on('result', {
-        onResult: (result: userAuth.UserAuthResult): void => {
-          auth.off('result');
-          if (attempt !== this.operationId) {
-            return;
-          }
-          this.activeAuth = undefined;
-          this.busy = false;
-          if (result.result !== userAuth.UserAuthResultCode.SUCCESS) {
-            this.message = 'Authentication was not completed. Access remains locked.';
-            return;
-          }
-          if (purpose === AuthPurpose.ENTER_OWNER) {
-            this.ownerAuthenticated = true;
-            this.armOwnerAuthorizationTimer();
-            this.screen = Screen.OWNER;
-            this.message = 'Owner authenticated. Viewer-only mode is available on this device.';
-          } else {
-            this.releaseImages();
-            this.ownerAuthenticated = true;
-            this.armOwnerAuthorizationTimer();
-            this.guestRequiresAuth = false;
-            this.screen = Screen.OWNER;
-            this.message = 'Session ended. Select new photos to continue.';
-          }
-        }
-      });
-      auth.start();
+      const salt = cryptoFramework.createRandom().generateRandomSync(16).data;
+      const hash = this.derivePin(this.pinInput, salt);
+      await this.pinPreferences.put(PIN_SALT_KEY, salt);
+      await this.pinPreferences.put(PIN_HASH_KEY, hash);
+      await this.pinPreferences.put(PIN_FAILURES_KEY, 0);
+      await this.pinPreferences.put(PIN_LOCK_UNTIL_KEY, 0);
+      await this.pinPreferences.flush();
+      this.pinSalt = salt;
+      this.pinHash = hash;
+      this.pinFailures = 0;
+      this.pinLockUntil = 0;
+      this.pinConfigured = true;
+      this.clearPinInput();
+      this.completeAuthentication(AuthPurpose.ENTER_OWNER);
     } catch (error) {
-      if (attempt === this.operationId) {
-        this.activeAuth = undefined;
-        this.busy = false;
-        this.message = 'System PIN authentication is unavailable. Configure a lock-screen PIN or use the clearly marked demo.';
-      }
+      this.message = 'The PIN could not be saved. Owner controls remain locked.';
+    } finally {
+      this.busy = false;
     }
   }
 
-  private cancelAuthentication(): void {
-    if (this.activeAuth !== undefined) {
-      try {
-        this.activeAuth.cancel();
-      } catch (error) {
-      }
-      this.activeAuth = undefined;
+  private async verifyPin(): Promise<void> {
+    if (this.busy || !isValidPin(this.pinInput) || this.pinPreferences === undefined) {
+      this.message = 'Enter the six-digit PIN.';
+      return;
     }
+    if (Date.now() < this.pinLockUntil) {
+      this.authenticate(this.pinPurpose);
+      return;
+    }
+
+    this.busy = true;
+    try {
+      const matches = constantTimeEqual(this.derivePin(this.pinInput, this.pinSalt), this.pinHash);
+      this.pinInput = '';
+      if (!matches) {
+        this.pinFailures++;
+        if (this.pinFailures >= PIN_MAX_FAILURES) {
+          this.pinFailures = 0;
+          this.pinLockUntil = Date.now() + PIN_LOCKOUT_MS;
+          this.message = 'Too many incorrect attempts. PIN entry is locked for 30 seconds.';
+        } else {
+          this.message = `Incorrect PIN. ${PIN_MAX_FAILURES - this.pinFailures} attempts remaining.`;
+        }
+        await this.savePinAttemptState();
+        return;
+      }
+      this.pinFailures = 0;
+      this.pinLockUntil = 0;
+      await this.savePinAttemptState();
+      this.completeAuthentication(this.pinPurpose);
+    } catch (error) {
+      this.lockAndClear('PIN verification failed. Owner controls remain locked.');
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async savePinAttemptState(): Promise<void> {
+    if (this.pinPreferences === undefined) {
+      throw new Error('PIN storage unavailable');
+    }
+    await this.pinPreferences.put(PIN_FAILURES_KEY, this.pinFailures);
+    await this.pinPreferences.put(PIN_LOCK_UNTIL_KEY, this.pinLockUntil);
+    await this.pinPreferences.flush();
+  }
+
+  private completeAuthentication(purpose: AuthPurpose): void {
+    this.ownerAuthenticated = true;
+    this.armOwnerAuthorizationTimer();
+    if (purpose === AuthPurpose.EXIT_GUEST) {
+      this.releaseImages();
+      this.message = 'Session ended. Select new photos to continue.';
+    } else {
+      this.message = 'Owner authenticated. Viewer-only mode is available on this device.';
+    }
+    this.screen = Screen.OWNER;
+  }
+
+  private cancelPinEntry(): void {
+    const returnToGuest = this.pinPurpose === AuthPurpose.EXIT_GUEST && this.imageCount > 0;
+    this.clearPinInput();
+    this.message = returnToGuest ? 'Owner return cancelled. Guest access remains restricted.' : 'Access remains locked.';
+    this.screen = returnToGuest ? Screen.GUEST : Screen.LOCKED;
+  }
+
+  private clearPinInput(): void {
+    this.pinInput = '';
+    this.pinConfirmation = '';
   }
 
   private async choosePhotos(): Promise<void> {
@@ -264,10 +369,9 @@ struct Index {
   }
 
   private startGuestViewer(): void {
-    if (this.screen !== Screen.REVIEW || this.imageCount === 0) {
+    if (this.screen !== Screen.REVIEW || this.imageCount === 0 || !this.ownerAuthenticated) {
       return;
     }
-    this.guestRequiresAuth = this.ownerAuthenticated;
     this.ownerAuthenticated = false;
     this.clearOwnerAuthorizationTimer();
     this.imageIndex = 0;
@@ -276,22 +380,17 @@ struct Index {
   }
 
   private endGuestSession(): void {
-    if (this.guestRequiresAuth) {
-      this.authenticate(AuthPurpose.EXIT_GUEST);
-      return;
-    }
-    this.lockAndClear('Viewer-only demo ended.');
+    this.authenticate(AuthPurpose.EXIT_GUEST);
   }
 
   private lockAndClear(reason: string): void {
     this.operationId++;
     this.clearOwnerAuthorizationTimer();
-    this.cancelAuthentication();
+    this.clearPinInput();
     this.releaseImages();
     this.pendingUris = [];
     this.pendingCount = 0;
     this.ownerAuthenticated = false;
-    this.guestRequiresAuth = false;
     this.busy = false;
     this.screen = Screen.LOCKED;
     this.message = reason;
@@ -332,12 +431,59 @@ struct Index {
     return this.screen === Screen.LOCKED;
   }
 
+  private isPinSetup(): boolean {
+    return this.screen === Screen.PIN_SETUP;
+  }
+
+  private isPinVerify(): boolean {
+    return this.screen === Screen.PIN_VERIFY;
+  }
+
   private isOwner(): boolean {
     return this.screen === Screen.OWNER;
   }
 
   private isReview(): boolean {
     return this.screen === Screen.REVIEW;
+  }
+
+  private hasProtectedLock(): boolean {
+    return this.isLocked() || this.isPinVerify() || this.screen === Screen.GUEST;
+  }
+
+  private lockStatusText(): string {
+    if (this.isLocked()) {
+      return 'APP LOCKED';
+    }
+    if (this.isPinSetup()) {
+      return 'CREATE OWNER PIN';
+    }
+    if (this.isPinVerify()) {
+      return 'OWNER ACCESS LOCKED · PIN REQUIRED';
+    }
+    if (this.screen === Screen.GUEST) {
+      return `GUEST VIEWER ACTIVE · ${this.imageCount} PHOTO${this.imageCount === 1 ? '' : 'S'} · PIN REQUIRED`;
+    }
+    return 'OWNER AUTHENTICATED · UP TO 2 MIN';
+  }
+
+  @Builder
+  private lockStatus() {
+    Row({ space: 10 }) {
+      Text(this.hasProtectedLock() ? '🔒' : '🔓')
+        .fontSize(24)
+      Text(this.lockStatusText())
+        .fontSize(14)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.hasProtectedLock() ? '#185C37' : '#8A3B12')
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
+    }
+    .width('100%')
+    .padding(12)
+    .borderRadius(12)
+    .backgroundColor(this.hasProtectedLock() ? '#E1F5E8' : '#FFF0E8')
+    .accessibilityText(this.lockStatusText())
   }
 
   @Builder
@@ -370,6 +516,7 @@ struct Index {
   private lockedScreen() {
     Scroll() {
       Column({ space: 22 }) {
+        this.lockStatus()
         Text('BorrowPhone')
           .fontSize(36)
           .fontWeight(FontWeight.Bold)
@@ -385,22 +532,79 @@ struct Index {
             .fontSize(17)
             .fontColor('#A10F2B')
             .textAlign(TextAlign.Center)
+        } else if (!this.pinLoaded) {
+          LoadingProgress()
+            .width(44)
+            .height(44)
         } else {
-          Button('Authenticate owner with system PIN')
+          Button(this.pinConfigured ? 'Enter owner PIN' : 'Create owner PIN')
             .width('100%')
             .height(54)
             .fontSize(17)
             .onClick(() => this.authenticate(AuthPurpose.ENTER_OWNER))
-            .enabled(!this.busy)
-            .accessibilityText('Authenticate owner with system PIN')
-          Button('Continue with unprotected MVP demo')
+            .enabled(!this.busy && this.pinStorageReady)
+            .accessibilityText(this.pinConfigured ? 'Enter owner PIN' : 'Create owner PIN')
+        }
+        this.statusText()
+      }
+      .width('100%')
+      .padding(24)
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  @Builder
+  private pinScreen() {
+    Scroll() {
+      Column({ space: 18 }) {
+        this.lockStatus()
+        Text(this.isPinSetup() ? 'Create owner PIN' : 'Enter owner PIN')
+          .fontSize(30)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#172033')
+        Text(this.isPinSetup() ?
+          'Choose a six-digit PIN. If forgotten, clear the application data to reset it.' :
+          'Enter the six-digit PIN to access owner controls.')
+          .fontSize(17)
+          .lineHeight(24)
+          .fontColor('#48505E')
+          .textAlign(TextAlign.Center)
+        TextInput({ text: this.pinInput, placeholder: '6-digit PIN' })
+          .type(InputType.NUMBER_PASSWORD)
+          .maxLength(6)
+          .showPasswordIcon(false)
+          .height(54)
+          .onChange((value: string) => this.pinInput = value)
+        if (this.isPinSetup()) {
+          TextInput({ text: this.pinConfirmation, placeholder: 'Repeat PIN' })
+            .type(InputType.NUMBER_PASSWORD)
+            .maxLength(6)
+            .showPasswordIcon(false)
+            .height(54)
+            .onChange((value: string) => this.pinConfirmation = value)
+          Button('Save PIN')
             .width('100%')
             .height(54)
-            .fontSize(17)
-            .type(ButtonType.Normal)
-            .onClick(() => this.openViewerDemo())
             .enabled(!this.busy)
-            .accessibilityText('Continue with unprotected viewer demo')
+            .onClick(() => this.createPin())
+        } else {
+          Button('Unlock owner controls')
+            .width('100%')
+            .height(54)
+            .enabled(!this.busy)
+            .onClick(() => this.verifyPin())
+        }
+        Button('Cancel')
+          .type(ButtonType.Normal)
+          .width('100%')
+          .height(50)
+          .enabled(!this.busy)
+          .onClick(() => this.cancelPinEntry())
+        if (this.busy) {
+          LoadingProgress()
+            .width(36)
+            .height(36)
         }
         this.statusText()
       }
@@ -415,6 +619,7 @@ struct Index {
   private ownerScreen() {
     Scroll() {
       Column({ space: 18 }) {
+        this.lockStatus()
         Text('Owner setup')
           .fontSize(30)
           .fontWeight(FontWeight.Bold)
@@ -508,6 +713,7 @@ struct Index {
   @Builder
   private reviewScreen() {
     Column({ space: 14 }) {
+      this.lockStatus()
       Text('Review selection')
         .fontSize(25)
         .fontWeight(FontWeight.Bold)
@@ -538,17 +744,18 @@ struct Index {
   @Builder
   private guestScreen() {
     Column({ space: 12 }) {
+      this.lockStatus()
       this.warningBanner()
       this.photo()
       this.navigationControls()
-      Button(this.guestRequiresAuth ? 'Return to owner' : 'End unprotected demo')
+      Button('Return to owner')
         .type(ButtonType.Normal)
         .width('100%')
         .height(52)
         .fontSize(17)
         .enabled(!this.busy)
         .onClick(() => this.endGuestSession())
-        .accessibilityText(this.guestRequiresAuth ? 'Authenticate to return to owner controls' : 'End unprotected demo')
+        .accessibilityText('Enter PIN to return to owner controls')
       if (this.busy) {
         LoadingProgress()
           .width(36)
@@ -566,6 +773,8 @@ struct Index {
     Stack() {
       if (this.isLocked()) {
         this.lockedScreen()
+      } else if (this.isPinSetup() || this.isPinVerify()) {
+        this.pinScreen()
       } else if (this.isOwner()) {
         this.ownerScreen()
       } else if (this.isReview()) {

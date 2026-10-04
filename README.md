@@ -45,7 +45,7 @@ You can leave the phone with a friend and do something else: no hovering, no wat
 
 > **Honest scope:** SafeShare locks itself, not the whole phone. OpenHarmony doesn't let a regular app block the Home gesture, so full-device lockdown would need an MDM-managed device. Details in [Security scope](#security-scope).
 
-Want to run it? See [Build and run](#build-and-run) or the step-by-step Linux guide [`SETUP_LINUX.md`](SETUP_LINUX.md) (in Polish).
+Want to run it? See [Build and run](#build-and-run) or the step-by-step Linux guide [`SETUP_LINUX.md`](SETUP_LINUX.md).
 
 ---
 

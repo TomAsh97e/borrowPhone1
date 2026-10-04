@@ -1,0 +1,106 @@
+// Component graph of the delivered app. Render: dot -Tpng -Gdpi=150 architecture.dot -o architecture.png
+digraph SafeShare {
+  graph [rankdir=TB, bgcolor="white", fontname="Arial", fontsize=13, labelloc=t, labeljust=c, nodesep=0.35,
+         ranksep=0.5, newrank=true, pad=0.3,
+         label=<<b>SafeShare — architecture</b><br/><font point-size="11">one HAP (org.hackyeah.borrowphone · ArkTS / ArkUI · API 23, min 20) · no network, no INTERNET permission · everything stays on the phone</font>>];
+  node  [shape=box, style="rounded,filled", fontname="Arial", fontsize=11, penwidth=1.2, margin="0.14,0.06"];
+  edge  [fontname="Arial", fontsize=9, color="#64748B", fontcolor="#334155", arrowsize=0.7];
+
+  ability [label=<<b>EntryAbility.ets</b><br/><font point-size="9">privacy window · onBackground → interruptionEpoch</font>>,
+           fillcolor="#E2E8F0", color="#475569"];
+
+  subgraph cluster_ui {
+    label=<<b>UI</b>  <font point-size="10">pages/Index.ets · one page, @State</font>>;
+    style="rounded,filled"; fillcolor="#F0F9FF"; color="#0284C7"; labeljust=l;
+    owner [label=<<b>Owner screen</b><br/><font point-size="9">gallery · notes · PDFs · period filter<br/>manual picks · AI bar · settings</font>>,
+           fillcolor="#E0F2FE", color="#0284C7"];
+    guest [label=<<b>Guest screen</b><br/><font point-size="9">photo viewer · notes · PDFs<br/>only the hand-off copy</font>>,
+           fillcolor="#D1FAE5", color="#059669"];
+    pin   [label=<<b>PIN pad</b><br/><font point-size="9">create · exit · panic lock · resume lock</font>>,
+           fillcolor="#FEE2E2", color="#DC2626"];
+    pdf   [label=<<b>PdfView.ets</b><br/><font point-size="9">ArkWeb · JS off · loads one vault file only</font>>,
+           fillcolor="#E0F2FE", color="#0284C7"];
+  }
+
+  subgraph cluster_svc {
+    label=<<b>Services</b>  <font point-size="10">service/</font>>;
+    style="rounded,filled"; fillcolor="#F5F3FF"; color="#7C3AED"; labeljust=r;
+    node [fillcolor="#EDE9FE", color="#7C3AED"];
+    store     [group=A, label=<<b>AppStore.ets</b><br/><font point-size="9">PIN: PBKDF2-SHA256 + salt<br/>lockout · settings</font>>];
+    vault     [group=C, label=<<b>Vault.ets</b><br/><font point-size="9">picker import · checks<br/>sandbox copies</font>>];
+    assistant [group=B, label=<<b>RangeAssistant.ets</b><br/><font point-size="9">gate → model → validation</font>>];
+    gallery   [group=D, label=<<b>Gallery.ets</b><br/><font point-size="9">permission · 500 newest<br/>EXIF camera model</font>>];
+    haptics   [label=<<b>Haptics.ets</b><br/><font point-size="9">vibrator</font>>];
+  }
+
+  subgraph cluster_native {
+    label=<<b>Native</b>  <font point-size="10">libentry.so · C++ / N-API</font>>;
+    style="rounded,filled"; fillcolor="#FFFBEB"; color="#D97706"; labelloc=b; labeljust=l;
+    node [fillcolor="#FEF3C7", color="#D97706"];
+    rangemodel [group=B, label=<<b>range_model.cpp</b><br/><font point-size="9">async work · prefix cache<br/>grammar-constrained sampling</font>>];
+    llama      [group=B, label=<<b>llama.cpp</b><br/><font point-size="9">CPU backend only</font>>];
+    gguf       [group=B, label=<<b>Qwen2.5-0.5B</b><br/><font point-size="9">Q4_K_M GGUF · 380 MB</font>>, shape=cylinder, style=filled];
+  }
+
+  subgraph cluster_model {
+    label=<<b>Rules</b>  <font point-size="10">model/ · pure TypeScript used by UI and services, unit-tested on Node</font>>;
+    style="rounded,filled"; fillcolor="#F0FDF4"; color="#16A34A"; labelloc=b; labeljust=l;
+    node [fillcolor="#DCFCE7", color="#16A34A"];
+    rules     [group=A, label=<<b>SessionRules.ts</b><br/><font point-size="9">periods · manual picks<br/>PIN format · constant-time compare</font>>];
+    documents [group=C, label=<<b>Documents.ts</b><br/><font point-size="9">file kinds · size limits<br/>PDF header and dates</font>>];
+    textrange [label=<<b>TextRange.ts</b><br/><font point-size="9">AI gate · grammar<br/>output checks</font>>];
+  }
+
+  // App sandbox storage
+  node [shape=cylinder, style=filled, fillcolor="#E2E8F0", color="#475569"];
+  prefs [group=A, label=<<font point-size="8" color="#475569">app sandbox</font><br/><b>preferences</b><br/><font point-size="9">PIN hash · lockout<br/>settings · guestActive</font>>];
+  files [group=C, label=<<font point-size="8" color="#475569">app sandbox</font><br/><b>files/vault/</b><br/><font point-size="9">notes · PDFs · index.json</font>>];
+
+  // OpenHarmony system services, drawn next to the code that calls them
+  node [shape=box, style="rounded,dashed,filled", fillcolor="white", color="#64748B"];
+  window [label=<<font point-size="8" color="#64748B">OpenHarmony</font><br/><b>Window manager</b><br/><font point-size="9">privacy mode · system bars</font>>];
+  picker [label=<<font point-size="8" color="#64748B">OpenHarmony</font><br/><b>File picker</b><br/><font point-size="9">DocumentViewPicker</font>>];
+  access [label=<<font point-size="8" color="#64748B">OpenHarmony</font><br/><b>Permissions</b><br/><font point-size="9">READ_IMAGEVIDEO</font>>];
+  media  [group=D, label=<<font point-size="8" color="#64748B">OpenHarmony</font><br/><b>Media library</b><br/><font point-size="9">photoAccessHelper</font>>];
+
+  // Layers, top to bottom
+  { rank=same; ability; window; }
+  { rank=same; guest; pin; }
+  { rank=same; store; vault; assistant; gallery; haptics; }
+  { rank=same; prefs; files; picker; rangemodel; access; media; }
+  { rank=same; rules; documents; textrange; llama; }
+
+  // Session flow inside the page
+  ability -> owner  [label=" loads page"];
+  ability -> window [label=" privacy mode"];
+  owner -> guest [label=" hand-off: copy\n of allowed items", color="#059669", fontcolor="#047857", penwidth=1.6];
+  guest -> pin   [label=" Back · Home · restart", color="#DC2626", fontcolor="#B91C1C", penwidth=1.6];
+  // Drawn downwards with the arrow reversed: the PIN pad returns to the owner screen.
+  owner -> pin   [dir=back, label=" correct PIN", color="#DC2626", fontcolor="#B91C1C", style=dashed];
+  guest -> pdf;
+
+  // UI → services
+  pin -> store;
+  owner -> vault;
+  owner -> assistant [label=" text"];
+  owner -> gallery;
+
+  // Services → storage, rules, native, system
+  store -> prefs;
+  store -> rules;
+  vault -> files;
+  vault -> picker;
+  vault -> documents;
+  assistant -> rangemodel [label=" N-API"];
+  assistant -> textrange;
+  rangemodel -> llama -> gguf;
+  gallery -> access;
+  gallery -> media;
+
+  // Invisible edges keeping the services below the PDF viewer and the order of each layer
+  edge [style=invis];
+  pdf -> store;
+  store -> vault -> assistant -> gallery -> haptics;
+  prefs -> files -> picker -> rangemodel -> access -> media;
+  rules -> documents -> textrange -> llama;
+}

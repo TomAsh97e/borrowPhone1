@@ -1,0 +1,27 @@
+// On-device period assistant pipeline (RangeAssistant.proposeRange). Render: dot -Tpng -Gdpi=150 assistant.dot -o assistant.png
+digraph Assistant {
+  graph [rankdir=LR, bgcolor="white", fontname="Arial", fontsize=13, labelloc=t, nodesep=0.35, ranksep=0.45, pad=0.3,
+         label=<<b>Period in words: the model is untrusted</b><br/><font point-size="11">each step narrows what it can do; nothing changes without the owner</font>>];
+  node  [shape=box, style="rounded,filled", fontname="Arial", fontsize=11, penwidth=1.2, margin="0.14,0.06"];
+  edge  [fontname="Arial", fontsize=9, color="#64748B", fontcolor="#334155", arrowsize=0.7];
+
+  text  [label=<<b>Owner types</b><br/><font point-size="9">"photos and PDFs<br/>from 1 to 3 October"</font>>, fillcolor="#E0F2FE", color="#0284C7"];
+  gate  [label=<<b>1 · Gate</b><br/><font point-size="9">TextRange.analyzeRequest<br/>≤ 120 chars · character whitelist<br/>photo/time words only · kinds</font>>, fillcolor="#DCFCE7", color="#16A34A"];
+  gram  [label=<<b>2 · Grammar</b><br/><font point-size="9">buildGrammar (GBNF)<br/>only values found in the text</font>>, fillcolor="#DCFCE7", color="#16A34A"];
+  model [label=<<b>3 · Model on device</b><br/><font point-size="9">range_model.cpp + llama.cpp<br/>Qwen2.5-0.5B · prompt isolation<br/>greedy · ≤ 48 tokens · ≈ 0.7 s</font>>, fillcolor="#FEF3C7", color="#D97706"];
+  check [label=<<b>4 · Validation</b><br/><font point-size="9">TextRange.interpretOutput<br/>strict JSON · values from the text<br/>real dates · no future · ≤ 366 days</font>>, fillcolor="#DCFCE7", color="#16A34A"];
+  card  [label=<<b>5 · Proposal card</b><br/><font point-size="9">period · kinds · thumbnails</font>>, fillcolor="#E0F2FE", color="#0284C7"];
+  apply [label=<<b>Period filter set</b><br/><font point-size="9">hand-off still needs<br/>the button and the PIN</font>>, fillcolor="#D1FAE5", color="#059669", penwidth=1.6];
+  reject [label=<<b>Rejected with a reason</b><br/><font point-size="9">e.g. “ignore” is not related to<br/>selecting photos, notes or PDFs</font>>, fillcolor="#FEE2E2", color="#DC2626"];
+  drop  [label=<<b>Discarded</b>>, fillcolor="#F1F5F9", color="#475569"];
+
+  text -> gate;
+  gate -> gram;
+  gram -> model [label=" request + grammar"];
+  model -> check [label=" JSON"];
+  check -> card;
+  card -> apply [label=" Approve", color="#059669", fontcolor="#047857", penwidth=1.5];
+  card -> drop  [label=" Reject / edit text"];
+  gate -> reject  [label=" off-topic", color="#DC2626", fontcolor="#B91C1C"];
+  check -> reject [label=" invalid", color="#DC2626", fontcolor="#B91C1C"];
+}

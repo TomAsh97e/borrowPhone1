@@ -1,0 +1,31 @@
+// Per-item sharing rule (Index.itemShared + SessionRules.isShared). Render: dot -Tpng -Gdpi=150 sharing.dot -o sharing.png
+digraph Sharing {
+  graph [rankdir=LR, bgcolor="white", fontname="Arial", fontsize=13, labelloc=t, nodesep=0.3, ranksep=0.5, pad=0.3,
+         label=<<b>Is an item shown to the guest?</b><br/><font point-size="11">the same rule for photos, notes and PDFs</font>>];
+  node  [fontname="Arial", fontsize=11, penwidth=1.2, style=filled, margin="0.12,0.05"];
+  edge  [fontname="Arial", fontsize=10, color="#64748B", fontcolor="#334155", arrowsize=0.7];
+
+  item   [shape=box, style="rounded,filled", label=<<b>Item</b><br/><font point-size="9">photo · note · PDF</font>>, fillcolor="#E0F2FE", color="#0284C7"];
+  kind   [shape=diamond, label="Kind\nswitched on?", fillcolor="white", color="#475569"];
+  period [shape=diamond, label="Date in the\nselected period?", fillcolor="white", color="#475569"];
+  hidden [shape=diamond, label="Hidden\nby tap?", fillcolor="#FEF3C7", color="#D97706"];
+  added  [shape=diamond, label="Added\nby tap?", fillcolor="#FEF3C7", color="#D97706"];
+  shown  [shape=box, style="rounded,filled", label=<<b>Shown</b><br/><font point-size="9">green check</font>>, fillcolor="#D1FAE5", color="#059669", penwidth=1.6];
+  node   [shape=box, style="rounded,filled", fillcolor="#FEE2E2", color="#DC2626", penwidth=1.6];
+  // Two "Locked" boxes keep every branch on its own side, so no lines cross.
+  hiddenLocked [label=<<b>Locked</b><br/><font point-size="9">guest sees only "+N"</font>>];
+  locked [label=<<b>Locked</b><br/><font point-size="9">guest sees only "+N"</font>>];
+
+  item -> kind;
+  kind -> period [label=" yes"];
+  kind -> locked [label=" no"];
+  period -> hidden [label=" yes"];
+  period -> added  [label=" no"];
+  hidden -> hiddenLocked [label=" yes"];
+  hidden -> shown  [label=" no"];
+  added -> shown   [label=" yes"];
+  added -> locked  [label=" no"];
+  { rank=same; hiddenLocked; shown; locked; }
+  edge [style=invis];
+  hiddenLocked -> shown -> locked;
+}

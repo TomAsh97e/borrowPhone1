@@ -1,0 +1,35 @@
+// Guest-session states (pages/Index.ets, PinMode). Render: dot -Tpng -Gdpi=150 session.dot -o session.png
+digraph Session {
+  graph [rankdir=LR, bgcolor="white", fontname="Arial", fontsize=13, labelloc=t, nodesep=0.45, ranksep=0.7, pad=0.3,
+         label=<<b>Hand-off and return</b><br/><font point-size="11">every way out of guest mode ends at the owner PIN</font>>];
+  node  [shape=box, style="rounded,filled", fontname="Arial", fontsize=11, penwidth=1.2, margin="0.14,0.06"];
+  edge  [fontname="Arial", fontsize=9, color="#64748B", fontcolor="#334155", arrowsize=0.7];
+
+  start  [shape=circle, label="", width=0.18, style=filled, fillcolor="#0F172A", color="#0F172A"];
+  owner  [label=<<b>Owner screen</b><br/><font point-size="9">select period, kinds, picks</font>>, fillcolor="#E0F2FE", color="#0284C7"];
+  create [label=<<b>Set PIN</b><br/><font point-size="9">first hand-off only</font>>, fillcolor="#FEF3C7", color="#D97706"];
+  confirm [label=<<b>Repeat PIN</b>>, fillcolor="#FEF3C7", color="#D97706"];
+  guest  [label=<<b>Guest mode</b><br/><font point-size="9">copy of allowed items · full screen<br/>guestActive = true · AI model freed</font>>,
+          fillcolor="#D1FAE5", color="#059669", penwidth=1.6];
+  exitpin [label=<<b>Exit PIN pad</b><br/><font point-size="9">can be cancelled</font>>, fillcolor="#FEE2E2", color="#DC2626"];
+  panic  [label=<<b>Panic lock</b><br/><font point-size="9">cannot be dismissed</font>>, fillcolor="#FEE2E2", color="#DC2626"];
+  resume [label=<<b>Resume lock</b><br/><font point-size="9">cannot be dismissed<br/>owner gallery not shown</font>>, fillcolor="#FEE2E2", color="#DC2626"];
+  check  [shape=diamond, label=<<b>PIN check</b><br/><font point-size="9">PBKDF2 · constant time</font>>, fillcolor="white", color="#DC2626", margin="0.04,0.04"];
+  lockout [label=<<b>30 s lockout</b><br/><font point-size="9">after 5 wrong PINs,<br/>persisted across restarts</font>>, fillcolor="#F1F5F9", color="#475569"];
+
+  start -> owner  [label=" start, guestActive = false"];
+  start -> resume [label=" start, guestActive = true\n (app killed / rebooted)", color="#DC2626", fontcolor="#B91C1C"];
+  owner -> create [label=" Hand off\n (no PIN yet)"];
+  create -> confirm;
+  confirm -> create [tailport=s, headport=s, label=" codes differ", style=dashed];
+  confirm -> guest [label=" PIN saved"];
+  owner -> guest  [label=" Hand off", color="#059669", fontcolor="#047857", penwidth=1.5];
+  guest -> exitpin [label=" Back button", color="#DC2626", fontcolor="#B91C1C"];
+  exitpin -> guest [label=" cancel", style=dashed];
+  guest -> panic  [label=" Home / app switch\n (onBackground)", color="#DC2626", fontcolor="#B91C1C"];
+  exitpin -> check;
+  panic -> check;
+  resume -> check;
+  check -> owner  [label=" correct: clear guest copy,\n guestActive = false", color="#059669", fontcolor="#047857", penwidth=1.5, constraint=false];
+  check -> lockout [label=" wrong ×5", style=dashed];
+}

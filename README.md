@@ -162,5 +162,6 @@ Device checks performed on the environment above:
 - `third_party/llama.cpp/` — pruned, patched llama.cpp ([notes](third_party/README.md)).
 - `tools/fetch_model.sh`, `tools/push_model.sh` — get the model and put it in the HAP or on the emulator.
 - `tests/session_rules_test.mjs`, `tests/text_range_test.mjs`, `tests/documents_test.mjs` — runnable lightweight checks; `tests/ai/` — host evaluation of the assistant.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture and implementation of the delivered app, with graphs in `diagrams/`.
 - [`01_ARCHITECTURE.md`](01_ARCHITECTURE.md) through [`05_HACKATHON_COMPLIANCE.md`](05_HACKATHON_COMPLIANCE.md) — design notes for the earlier picker-based MVP.
 - [`AI_WORKFLOW.md`](AI_WORKFLOW.md) — AI-use disclosure.

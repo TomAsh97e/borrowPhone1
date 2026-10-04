@@ -61,6 +61,8 @@ The app requests `ohos.permission.READ_IMAGEVIDEO`. Its level is `system_basic` 
 
 ## Build and run
 
+Step-by-step setup on a clean Linux machine (in Polish): [`SETUP_LINUX.md`](SETUP_LINUX.md).
+
 Install Node.js 20+ (22 recommended), a JDK, and `oniro-app`:
 
 ```bash
@@ -89,7 +91,9 @@ Every `oniro-app sign` run generates new signing material, so an already install
 
 ### Demo photos
 
-The gallery needs photos with dates. Copy JPEG/PNG files (their EXIF `DateTimeOriginal` becomes the photo date) into the media library:
+`tools/push_demo_data.sh` copies [`demo_data/`](demo_data/README.md) to the connected emulator: the photos into the media library, the notes and PDFs into `Download` (with their demo dates) for the in-app import.
+
+For your own photos, copy JPEG/PNG files (their EXIF `DateTimeOriginal` becomes the photo date) into the media library:
 
 ```bash
 ~/setup-ohos-sdk/linux/23/toolchains/hdc file send ./photos /data/local/tmp/photos
@@ -161,6 +165,7 @@ Device checks performed on the environment above:
 - `entry/src/main/cpp/` — N-API module: `range_model.cpp` (prompt, prefix cache, grammar-constrained sampling) and `napi_init.cpp`.
 - `third_party/llama.cpp/` — pruned, patched llama.cpp ([notes](third_party/README.md)).
 - `tools/fetch_model.sh`, `tools/push_model.sh` — get the model and put it in the HAP or on the emulator.
+- `tools/push_demo_data.sh` — put the demo photos, notes and PDFs on the emulator.
 - `tests/session_rules_test.mjs`, `tests/text_range_test.mjs`, `tests/documents_test.mjs` — runnable lightweight checks; `tests/ai/` — host evaluation of the assistant.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture and implementation of the delivered app, with graphs in `diagrams/`.
 - [`01_ARCHITECTURE.md`](01_ARCHITECTURE.md) through [`05_HACKATHON_COMPLIANCE.md`](05_HACKATHON_COMPLIANCE.md) — design notes for the earlier picker-based MVP.

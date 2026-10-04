@@ -222,21 +222,18 @@ W emulatorze pojawi się pytanie o dostęp do zdjęć: wybierz **Allow**. Przy p
 
 W świeżym emulatorze galeria jest pusta. Gotowe pliki są w [demo_data/](demo_data/README.md) i mają daty z okolic **niedzieli 4 października 2026**. Jeśli data w emulatorze jest inna, przyciski „Today” i „Yesterday” mogą ich nie obejmować. Użyj wtedy własnego zakresu dat (custom range).
 
-**Zdjęcia**: trafiają do galerii systemowej, a datą zdjęcia staje się EXIF `DateTimeOriginal`:
+Emulator musi być uruchomiony i połączony (krok 6). Z katalogu projektu:
 
 ```bash
-hdc file send demo_data/photos /data/local/tmp/photos
-hdc shell mediatool send /data/local/tmp/photos
+tools/push_demo_data.sh
 ```
 
-**Notatki i PDF-y** importuje się w aplikacji przez systemowy wybór plików (zakładki Notes / PDF → import). Najpierw skopiuj je do publicznego katalogu „Download” emulatora:
+Skrypt:
 
-```bash
-hdc shell mkdir -p /storage/media/100/local/files/Docs/Download
-for f in demo_data/notes/* demo_data/pdfs/*; do
-  hdc file send "$f" /storage/media/100/local/files/Docs/Download/
-done
-```
+- dodaje 7 zdjęć do galerii systemowej. Datą zdjęcia jest EXIF `DateTimeOriginal`. Zdjęcia, które już są w galerii, pomija, więc skrypt można uruchomić ponownie.
+- kopiuje 3 notatki i 3 PDF-y do katalogu **Download** w emulatorze i ustawia im daty z [demo_data/README.md](demo_data/README.md). Notatki biorą datę z czasu modyfikacji pliku, a ani git, ani `hdc file send` go nie zachowują.
+
+Zdjęcia pojawią się w aplikacji po jej ponownym otwarciu. **Notatki i PDF-y** importujesz w aplikacji: zakładka **Notes** (albo **PDF**) → **Import** → **Download** → wybierz plik.
 
 ---
 
@@ -301,6 +298,7 @@ oniro-app app launch .
 | --- | --- |
 | `oniro-app: command not found` albo błąd składni w Node | Terminal używa starego Node. Wykonaj `nvm use 22` (albo `nvm alias default 22`) i otwórz nowy terminal. |
 | Emulator: `Could not access KVM kernel module: Permission denied` | Brak grupy `kvm` w bieżącej sesji. Wyloguj się i zaloguj (krok 2) albo uruchom przez `sg kvm -c "…"`. |
+| Emulator: `Could not set up host forwarding rule 'tcp::5555-:5555'` | Działa już inny emulator (port 5555 jest zajęty). Zamknij go albo użyj tego, który już działa. |
 | Emulator: `KVM not available` / bardzo wolny start | Wirtualizacja wyłączona w BIOS/UEFI. Włącz Intel VT-x / AMD-V (SVM). |
 | Okno emulatora się nie otwiera albo się wysypuje, gdy uruchamiasz go z terminala VS Code | Uruchom emulator ze zwykłego terminala systemowego, nie z wbudowanego terminala VS Code (szczególnie w wersji snap). |
 | Brak ekranu graficznego (serwer, SSH) | Uruchom z `--display vnc`: `QEMU_EXTRA_ARGS='-vga none' …/launch/linux.sh -r 720x1280 --display vnc`, a potem połącz się klientem VNC z `127.0.0.1:5921`. |
@@ -309,6 +307,7 @@ oniro-app app launch .
 | Instalacja: `sign info inconsistent` / niezgodny podpis | Aplikacja była podpisana innymi kluczami. Wykonaj `oniro-app app uninstall org.hackyeah.borrowphone` i zainstaluj ponownie. To usuwa też zapisany PIN. |
 | Instalacja: `grant request permissions failed` | Podpis bez `--acls`. Wykonaj `oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO`, potem odinstaluj, zbuduj i zainstaluj ponownie. |
 | Build: brak plików w `signatures/` | Nie wykonano kroku 7.1 na tym komputerze. |
+| Build: `fatal error: 'models/models.h' file not found` | Klon sprzed poprawki, w którym brakowało `third_party/llama.cpp/src/models/`. Wykonaj `git pull`, potem `rm -rf entry/.cxx` i zbuduj ponownie. |
 | `oniro-app screenshot` pokazuje tylko ekran główny | Tak ma być: okno aplikacji działa w trybie prywatności (blokada zrzutów ekranu). |
 | Okna dialogowe pojawiają się z 1,5–3 s opóźnieniem | To normalne na emulatorze przy pierwszym otwarciu. |
 | PDF: „PDF preview is unavailable on this device” | Ograniczenie emulatora x86_64 (ArkWeb tylko dla arm64). Podgląd PDF działa na urządzeniu arm64. |

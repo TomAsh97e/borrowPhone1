@@ -8,6 +8,8 @@ All files are synthetic and dated around Sunday, 4 October 2026, matching the On
 
 This makes the Today, Yesterday, Weekend, custom-range, manual-selection, file-type tabs, locked-item, preview, EXIF, and natural-language period features easy to demonstrate.
 
+Copy them to the connected emulator with `tools/push_demo_data.sh`; then import the notes and PDFs in the app (Notes / PDF tab → Import → Download).
+
 Useful assistant requests:
 
 - `photos from today`

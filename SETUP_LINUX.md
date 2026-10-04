@@ -1,289 +1,204 @@
-# Uruchomienie SafeShare na czystym Linuksie: krok po kroku
+# Run SafeShare on Linux
 
-Instrukcja prowadzi od świeżo zainstalowanego systemu do aplikacji działającej w emulatorze OpenHarmony. Wszystkie komendy wpisujesz w terminalu. Sprawdzona na **Ubuntu 24.04 (x86_64)** z wersjami podanymi w [README](README.md#tested-environment). Na innych dystrybucjach zmieniają się tylko nazwy pakietów w kroku 1.
+This guide is for **Ubuntu 24.04 on an x86_64 computer**. It runs the app in an OpenHarmony phone emulator.
 
-Co zostanie zainstalowane:
+You need about **25 GB of free disk space**, an internet connection, and preferably **16 GB of RAM**. Enable CPU virtualization (Intel VT-x or AMD-V) in BIOS/UEFI. The optional AI setup needs a few more GB.
 
-| Narzędzie | Do czego | Gdzie trafia |
-| --- | --- | --- |
-| Pakiety systemowe (JDK, QEMU, git, curl…) | podpisywanie aplikacji, emulator | system (`apt`) |
-| Node.js 22 (przez nvm) | uruchamia `oniro-app` i testy | `~/.nvm` |
-| `oniro-app` | CLI: SDK, budowanie, podpis, instalacja | globalny pakiet npm |
-| OpenHarmony SDK 6.1 (API 23) | kompilator ArkTS, natywny toolchain, `hdc` | `~/setup-ohos-sdk/linux/23` |
-| Command-line tools 5.1 | `hvigorw`, `ohpm` | `~/command-line-tools` |
-| Emulator OpenHarmony 7.0 (QEMU, telefon x86_64) | urządzenie, na którym działa aplikacja | `~/.ohos-qemu` |
-| Ollama + model Qwen2.5-0.5B (opcjonalnie) | pobranie modelu dla asystenta „period in words” | Ollama: system; model: `models/` w repo |
+If the tools are already installed, go to [Start the emulator](#4-start-the-emulator). If you already have the project, use its existing folder instead of cloning it again.
 
----
-
-## 0. Wymagania sprzętowe
-
-- Procesor **x86_64** z wirtualizacją (Intel VT-x albo AMD-V) **włączoną w BIOS/UEFI**. Bez KVM emulator też ruszy, ale będzie bardzo wolny.
-- **RAM**: minimum 8 GB, zalecane 16 GB (emulator sam zajmuje 4 GB).
-- **Dysk**: około **25 GB wolnego miejsca** (SDK ≈ 3,7 GB, command-line tools ≈ 7 GB, emulator ≈ 4,7 GB, plus archiwa pobierane w trakcie instalacji). Opcjonalny asystent AI wymaga jeszcze około 3 GB (Ollama ≈ 2,3 GB i dwie kopie modelu).
-- Internet: w sumie pobiera się kilka GB.
-
-Sprawdzenie:
-
-```bash
-uname -m                              # ma być: x86_64
-grep -cE 'vmx|svm' /proc/cpuinfo      # ma być liczba większa od 0
-df -h ~                               # kolumna "Avail" ≥ 25G
-```
-
----
-
-## 1. Pakiety systemowe
+## 1. Install system tools
 
 ```bash
 sudo apt update
 sudo apt install -y git curl unzip tar zstd coreutils \
-    openjdk-21-jdk-headless \
-    qemu-system-x86 qemu-system-gui qemu-utils \
-    cpu-checker
-```
-
-- `zstd` jest potrzebny instalatorowi Ollamy (krok 9).
-- `openjdk-21-jdk-headless` daje `java` i `keytool`, których `oniro-app sign` używa do podpisu.
-- `qemu-system-x86` i `qemu-system-gui` to emulator i jego okno (SDL).
-- `cpu-checker` daje polecenie `kvm-ok`.
-
-Opcjonalnie, tylko jeśli chcesz uruchamiać test modelu AI na komputerze (krok 10):
-
-```bash
-sudo apt install -y build-essential cmake ninja-build
-```
-
-> Fedora: `sudo dnf install git curl unzip zstd java-21-openjdk-devel qemu-kvm qemu-ui-sdl`.
-
----
-
-## 2. Dostęp do KVM
-
-```bash
-kvm-ok                         # oczekiwane: "KVM acceleration can be used"
+  openjdk-21-jdk-headless \
+  qemu-system-x86 qemu-system-gui qemu-utils cpu-checker
 sudo usermod -aG kvm "$USER"
 ```
 
-**Wyloguj się i zaloguj ponownie** (albo zrestartuj komputer), żeby nowa grupa zaczęła działać. Potem sprawdź:
+**Log out and log in again**, then check that hardware acceleration works:
 
 ```bash
-groups | grep -w kvm           # musi wypisać linię z "kvm"
+kvm-ok
 ```
 
-Jeśli nie chcesz się teraz wylogowywać, każde polecenie emulatora możesz poprzedzić `sg kvm -c "…"` (pokazane w kroku 6).
+The result should include `KVM acceleration can be used`.
 
----
+## 2. Install Node.js and oniro-app
 
-## 3. Node.js 22
+Use **Node.js 22.18 or newer in the 22.x series**. Ubuntu's default Node.js 18 is too old for this setup.
 
-`oniro-app` wymaga Node.js 20 lub nowszego, a testy projektu Node.js 22.18 lub nowszego. Node z repozytorium Ubuntu jest za stary (wersja 18), dlatego instalujemy go przez **nvm**, bez `sudo`:
-
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-```
-
-Zamknij i otwórz terminal (albo wykonaj `source ~/.bashrc`, a w zsh `source ~/.zshrc`), a potem:
+Install [nvm](https://github.com/nvm-sh/nvm/tree/v0.40.3), then Node.js:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source "$HOME/.nvm/nvm.sh"
 nvm install 22
 nvm alias default 22
-node --version                 # v22.x.x, gdzie x ≥ 18
+nvm use 22
+node --version
 ```
 
----
-
-## 4. `oniro-app` (CLI do OpenHarmony)
+Install the version of `oniro-app` used for this project. Do not use `sudo` for this command:
 
 ```bash
-npm install -g @oniroproject/oniro-app
-oniro-app --version            # sprawdzone na 0.11.0
+npm install -g @oniroproject/oniro-app@0.11.0
+oniro-app --version
 ```
 
----
-
-## 5. SDK OpenHarmony i command-line tools
-
-Projekt kompiluje się z API 23 (`compileSdkVersion: 23` w [build-profile.json5](build-profile.json5)), czyli z SDK **6.1**:
+## 3. Install the OpenHarmony SDK
 
 ```bash
-oniro-app sdk install 6.1      # → ~/setup-ohos-sdk/linux/23   (kilka minut)
-oniro-app cmdtools install     # → ~/command-line-tools        (kilka minut)
+oniro-app sdk install 6.1
+oniro-app cmdtools install
 ```
 
-Sprawdzenie:
+These commands install API 23 in `~/setup-ohos-sdk/linux/23` and build tools in `~/command-line-tools`. Downloads may take several minutes.
 
-```bash
-oniro-app sdk list             # przy "6.1  api 23" musi być gwiazdka *
-oniro-app cmdtools status      # "Installed (5.1.0.840)"
-```
-
-Dodaj `hdc` (narzędzie do komunikacji z urządzeniem, odpowiednik `adb`) do `PATH`. Dopisz tę linię na końcu `~/.bashrc` (w zsh: `~/.zshrc`) i otwórz nowy terminal:
+Add the device connection tool, `hdc`, to your current terminal:
 
 ```bash
 export PATH="$HOME/setup-ohos-sdk/linux/23/toolchains:$PATH"
+hdc version
 ```
 
-```bash
-hdc version                    # wypisuje wersję, np. "Ver: 3.x.x"
-```
+Also add the `export PATH=...` line above to `~/.bashrc`, or `~/.zshrc` if you use zsh, so it works in new terminals.
 
-> Jeśli instalacja przerywa się z braku miejsca na archiwa tymczasowe, wskaż inny katalog: `oniro-app cmdtools install --tmp-dir /ścieżka/z/miejscem`.
+## 4. Start the emulator
 
----
-
-## 6. Emulator OpenHarmony 7.0 (QEMU)
-
-### Instalacja
-
-Obraz telefonu x86_64 z projektu [harmony-contrib/ohos-qemu](https://github.com/harmony-contrib/ohos-qemu), w wersji, na której aplikacja była testowana:
+Install the [OpenHarmony QEMU image](https://github.com/harmony-contrib/ohos-qemu) once:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/harmony-contrib/ohos-qemu/main/scripts/install.sh \
   | bash -s -- --release v20260809
 ```
 
-Skrypt pobiera i rozpakowuje obraz (około 4,7 GB) do `~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/`.
-
-### Uruchomienie
-
-W **osobnym terminalu**, bo emulator działa, dopóki ten terminal jest otwarty:
+In **terminal 1**, start the emulator and leave the terminal open:
 
 ```bash
 ~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/launch/linux.sh -r 720x1280
 ```
 
-Jeśli po kroku 2 sesja nie była jeszcze odświeżona (bez ponownego logowania):
+If the emulator is already running, use that instance. Do not start a second one.
+
+In **terminal 2**, connect to it:
 
 ```bash
-sg kvm -c "~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/launch/linux.sh -r 720x1280"
-```
-
-Otworzy się okno z telefonem, a start trwa około 15–30 s.
-
-### Połączenie `hdc` z emulatorem
-
-W drugim terminalu:
-
-```bash
+export PATH="$HOME/setup-ohos-sdk/linux/23/toolchains:$PATH"
 hdc tconn 127.0.0.1:5555
-hdc list targets                               # ma wypisać 127.0.0.1:5555
-hdc shell param get bootevent.boot.completed   # "true" = system wystartował
+hdc list targets
+hdc shell param get bootevent.boot.completed
 ```
 
-Jeśli `list targets` pokazuje `[Empty]`, emulator jeszcze się uruchamia: odczekaj chwilę i powtórz `hdc tconn …`.
+Wait until the target is `127.0.0.1:5555` and the last command returns `true`. If the target list is empty, wait a little and repeat the connection command.
 
-Zatrzymanie emulatora: `hdc shell reboot shutdown` albo zamknięcie jego okna.
+Run the remaining commands in terminal 2.
 
-> **Alternatywa:** `oniro-app emulator install` i `oniro-app emulator start --wait-for-hdc 300` instalują i uruchamiają emulator Oniro (OpenHarmony 6.1, `hdc` na `127.0.0.1:55555`, katalog `~/oniro-emulator`). Na nim był sprawdzany asystent AI. Główne testy aplikacji przeprowadzono jednak na obrazie 7.0 opisanym wyżej.
+## 5. Get the project and run it
 
----
-
-## 7. Pobranie, podpisanie, zbudowanie i uruchomienie projektu
+If you do not have the project yet:
 
 ```bash
-mkdir -p ~/projects && cd ~/projects
+mkdir -p ~/projects
+cd ~/projects
 git clone https://github.com/TomAsh97e/borrowPhone1.git
 cd borrowPhone1
 ```
 
-### 7.1 Podpis (jednorazowo na danym komputerze)
-
-Katalog `signatures/` z kluczami **nie jest w repozytorium** (jest w `.gitignore`), więc na nowym komputerze trzeba go wygenerować:
+If you already have it, open that folder instead. For example, on the current development computer:
 
 ```bash
-oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO
+cd /home/ludek/projects/drones/borrowPhone1
 ```
 
-- `--acls ohos.permission.READ_IMAGEVIDEO` jest obowiązkowe. Bez tego instalacja kończy się błędem `grant request permissions failed`, bo dostęp do galerii to uprawnienie poziomu `system_basic`.
-- Polecenie nadpisuje blok `signingConfigs` w `build-profile.json5` (nowe hasła i ścieżki). **Nie commituj tej zmiany**, bo dotyczy tylko twojego komputera.
-- Każde kolejne `oniro-app sign` tworzy **nowe** klucze. Wcześniej zainstalowaną aplikację trzeba wtedy odinstalować (zob. sekcję „Problemy”).
-
-### 7.2 Budowanie
+Create the signing files, build, install, and launch:
 
 ```bash
+oniro-app sign . --bootstrap --acls ohos.permission.READ_IMAGEVIDEO
 oniro-app build .
-```
-
-Pierwsze budowanie trwa kilka minut, bo kompiluje się też natywna biblioteka z llama.cpp, osobno dla `arm64-v8a` i `x86_64`. Kolejne są szybsze. Wynik to `entry/build/default/outputs/default/entry-default-signed.hap`.
-
-### 7.3 Instalacja i uruchomienie (emulator musi działać, krok 6)
-
-```bash
-hdc tconn 127.0.0.1:5555
 oniro-app app install .
 oniro-app app launch .
 ```
 
-W emulatorze pojawi się pytanie o dostęp do zdjęć: wybierz **Allow**. Przy pierwszym przekazaniu telefonu aplikacja poprosi o utworzenie 4-cyfrowego PIN-u.
+`--bootstrap` keeps existing signing files. On a fresh clone, it creates them with the gallery permission. Keep these files for future builds: generating new keys can prevent updates to an installed app. Do not commit the generated signing files or the local signing changes in `build-profile.json5`.
 
----
+The first build can take several minutes. The app package is saved as `entry/build/default/outputs/default/entry-default-signed.hap`.
 
-## 8. Dane demonstracyjne (zdjęcia, notatki, PDF-y)
+When the app asks for access to photos, choose **Allow**. It asks you to create a four-digit PIN when you first enter guest mode.
 
-W świeżym emulatorze galeria jest pusta. Gotowe pliki są w [demo_data/](demo_data/README.md) i mają daty z okolic **niedzieli 4 października 2026**. Jeśli data w emulatorze jest inna, przyciski „Today” i „Yesterday” mogą ich nie obejmować. Użyj wtedy własnego zakresu dat (custom range).
+## 6. Add demo files
 
-Emulator musi być uruchomiony i połączony (krok 6). Z katalogu projektu:
+From the project folder, with the emulator running:
 
 ```bash
 tools/push_demo_data.sh
+oniro-app app stop org.hackyeah.borrowphone
+oniro-app app launch .
 ```
 
-Skrypt:
+This adds photos to the system gallery and copies notes and PDFs to **Download**. Existing demo photos are skipped.
 
-- dodaje 7 zdjęć do galerii systemowej. Datą zdjęcia jest EXIF `DateTimeOriginal`. Zdjęcia, które już są w galerii, pomija, więc skrypt można uruchomić ponownie.
-- kopiuje 3 notatki i 3 PDF-y do katalogu **Download** w emulatorze i ustawia im daty z [demo_data/README.md](demo_data/README.md). Notatki biorą datę z czasu modyfikacji pliku, a ani git, ani `hdc file send` go nie zachowują.
+In the app, open **Notes** or **PDF**, tap **Import**, and choose files from **Download**.
 
-Zdjęcia pojawią się w aplikacji po jej ponownym otwarciu. **Notatki i PDF-y** importujesz w aplikacji: zakładka **Notes** (albo **PDF**) → **Import** → **Download** → wybierz plik.
+The demo files are dated around **4 October 2026**. If Today or Yesterday shows no files, choose a custom date range that includes those dates.
 
----
+## 7. Enable AI (optional)
 
-## 9. Model AI dla „period in words” (opcjonalnie)
+The app works without AI. To select a period using text such as `photos from the last 3 days`, you need the model.
 
-Bez modelu aplikacja działa normalnie, a pole opisu okresu słowami pokazuje tylko komunikat „The AI assistant is unavailable on this device”. Modelu nie ma w repozytorium. Pobiera się go przez **Ollamę** (`qwen2.5:0.5b`, około 400 MB).
+**The model is not included in `git clone`.** The project scripts download it through Ollama. The model runs inside the app; Ollama is only used to download it on your computer.
 
-### 9.1 Instalacja Ollamy (jednorazowo)
+Install [Ollama](https://docs.ollama.com/linux) once:
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
+sudo systemctl start ollama
 ollama --version
 ```
 
-Instalator prosi o hasło `sudo`. Uruchamia Ollamę jako usługę systemową i dodaje twoje konto do grupy `ollama`. Ta grupa zacznie działać po ponownym zalogowaniu.
-
-### 9.2 Pobranie modelu
-
-Z katalogu projektu:
-
-```bash
-tools/fetch_model.sh
-```
-
-Skrypt wykonuje `ollama pull qwen2.5:0.5b`, a potem kopiuje plik modelu (GGUF) z magazynu Ollamy do `models/range-parser.gguf` i sprawdza jego sumę SHA-256. Jeśli po instalacji Ollamy nie było jeszcze ponownego logowania, skrypt poprosi o hasło `sudo`, żeby odczytać plik z katalogu usługi. Gdy model jest już w `models/`, skrypt niczego nie pobiera.
-
-### 9.3 Wgranie modelu na emulator
-
-Na **emulatorze** model wgrywa się bezpośrednio do piaskownicy aplikacji, bo partycja danych jest za mała na wersję z modelem w środku HAP-a. Aplikacja musi być zainstalowana i **raz uruchomiona** (krok 7.3):
+The app must already be installed and have been opened once. With the emulator connected, run this from the project folder:
 
 ```bash
 tools/push_model.sh
+oniro-app app stop org.hackyeah.borrowphone
+oniro-app app launch .
 ```
 
-Następnie uruchom aplikację od nowa:
+`push_model.sh` automatically runs `fetch_model.sh` if needed. It downloads `qwen2.5:0.5b` (about 400 MB), copies it to `models/range-parser.gguf`, then sends it to the app. Copying from Ollama's storage may ask for your `sudo` password. An existing local GGUF file is reused.
+
+After uninstalling the app, run `tools/push_model.sh` again to restore the model.
+
+For a compatible physical OpenHarmony device with enough storage, you can include the model in the app package:
 
 ```bash
-oniro-app app stop org.hackyeah.borrowphone && oniro-app app launch .
+tools/fetch_model.sh --bundle
+oniro-app build .
 ```
 
-Jeśli pominiesz krok 9.2, `push_model.sh` sam go najpierw wykona.
+Do not use `--bundle` for this emulator: its data partition is too small for installation with the extra model copies.
 
-> Na **prawdziwym telefonie** użyj `tools/fetch_model.sh --bundle` i zbuduj ponownie (`oniro-app build .`). Model trafi wtedy do HAP-a, który urośnie do około 395 MB.
+## 8. Run it again later
 
----
+Start the emulator as shown in step 4. In another terminal, open your project folder and run:
 
-## 10. Testy (opcjonalnie)
+```bash
+hdc tconn 127.0.0.1:5555
+oniro-app app launch .
+```
 
-Lekkie testy logiki, bez emulatora:
+After changing the code, rebuild and install before launching:
+
+```bash
+oniro-app build .
+oniro-app app install .
+oniro-app app launch .
+```
+
+You do not need to sign again or download the model again.
+
+## Optional checks
+
+Run the logic checks without the emulator:
 
 ```bash
 node tests/session_rules_test.mjs
@@ -291,53 +206,47 @@ node tests/text_range_test.mjs
 node tests/documents_test.mjs
 ```
 
-Test asystenta AI na komputerze, tym samym kodem C++ co w aplikacji. Wymaga pakietów z kroku 1 (`build-essential cmake ninja-build`) i pobranego modelu (krok 9):
+To test the AI on your computer, install the extra build tools and download the model first:
 
 ```bash
-cmake -S tests/ai -B /tmp/range-eval -G Ninja && cmake --build /tmp/range-eval
+sudo apt install -y build-essential cmake ninja-build
+tools/fetch_model.sh
+cmake -S tests/ai -B /tmp/range-eval -G Ninja
+cmake --build /tmp/range-eval
 node tests/ai/run_eval.mjs /tmp/range-eval/range_eval models/range-parser.gguf
 ```
 
----
+## Common problems
 
-## 11. Codzienna praca: ściąga
+| Problem | What to do |
+| --- | --- |
+| `nvm: command not found` | Run `source "$HOME/.nvm/nvm.sh"`, then `nvm use 22`. |
+| `oniro-app: command not found`, or Node.js errors | Run `nvm use 22` and check `node --version`. If needed, install `oniro-app` again under Node.js 22 using step 2. |
+| KVM permission denied | Log out and back in after step 1. Check that `groups` includes `kvm`. |
+| KVM is unavailable | Enable virtualization in BIOS/UEFI. Without it, the emulator may be very slow. |
+| Port 5555 is already in use | An emulator may already be running. Connect to it instead of starting another. |
+| The emulator window fails to open | Try a normal desktop terminal instead of the VS Code terminal, or use VNC below. |
+| `hdc list targets` shows `[Empty]` | Wait for the emulator to start, then run `hdc tconn 127.0.0.1:5555` again. |
+| Install fails with `sign info inconsistent` | Uninstall with `oniro-app app uninstall org.hackyeah.borrowphone`, then install again. **This deletes the app's PIN, settings, imported files, and model.** |
+| Install fails with `grant request permissions failed` | Regenerate the signature with `oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO` (without `--bootstrap`), rebuild, then uninstall the old app and install again. Uninstalling deletes app data. |
+| AI is unavailable | Complete step 7 and restart the app. |
+| Ollama connection refused | Run `sudo systemctl start ollama`, then retry. |
+| The model script warns that the model has changed | The downloaded version differs from the tested one. Run the optional AI checks above. |
+| Demo photos are missing from Today or Yesterday | Use a custom date range around 4 October 2026. |
+| Not enough disk space | Free space before retrying. For build-tool downloads, you can choose another disk with `oniro-app cmdtools install --tmp-dir /path/with/free/space`. |
+
+For a computer without a working emulator window, start it with VNC:
 
 ```bash
-# terminal 1: emulator
-~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/launch/linux.sh -r 720x1280
-
-# terminal 2: projekt
-cd ~/projects/borrowPhone1
-hdc tconn 127.0.0.1:5555
-oniro-app build .
-oniro-app app install .
-oniro-app app launch .
+QEMU_EXTRA_ARGS='-vga none' \
+  ~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/launch/linux.sh \
+  -r 720x1280 --display vnc
 ```
 
----
+Connect a VNC viewer to `127.0.0.1:5921`. This replaces the normal emulator launch command.
 
-## 12. Problemy i rozwiązania
+## Known limits
 
-| Objaw | Przyczyna i rozwiązanie |
-| --- | --- |
-| `oniro-app: command not found` albo błąd składni w Node | Terminal używa starego Node. Wykonaj `nvm use 22` (albo `nvm alias default 22`) i otwórz nowy terminal. |
-| Emulator: `Could not access KVM kernel module: Permission denied` | Brak grupy `kvm` w bieżącej sesji. Wyloguj się i zaloguj (krok 2) albo uruchom przez `sg kvm -c "…"`. |
-| Emulator: `Could not set up host forwarding rule 'tcp::5555-:5555'` | Działa już inny emulator (port 5555 jest zajęty). Zamknij go albo użyj tego, który już działa. |
-| Emulator: `KVM not available` / bardzo wolny start | Wirtualizacja wyłączona w BIOS/UEFI. Włącz Intel VT-x / AMD-V (SVM). |
-| Okno emulatora się nie otwiera albo się wysypuje, gdy uruchamiasz go z terminala VS Code | Uruchom emulator ze zwykłego terminala systemowego, nie z wbudowanego terminala VS Code (szczególnie w wersji snap). |
-| Brak ekranu graficznego (serwer, SSH) | Uruchom z `--display vnc`: `QEMU_EXTRA_ARGS='-vga none' …/launch/linux.sh -r 720x1280 --display vnc`, a potem połącz się klientem VNC z `127.0.0.1:5921`. |
-| Emulator działa wolno, przewijanie się tnie | Grafika w emulatorze jest renderowana programowo. Pomaga mniejsza rozdzielczość, np. `-r 540x960`. |
-| `hdc list targets` → `[Empty]` | Emulator jeszcze się uruchamia albo połączenie zerwało się po restarcie. Powtórz `hdc tconn 127.0.0.1:5555`. |
-| Instalacja: `sign info inconsistent` / niezgodny podpis | Aplikacja była podpisana innymi kluczami. Wykonaj `oniro-app app uninstall org.hackyeah.borrowphone` i zainstaluj ponownie. To usuwa też zapisany PIN. |
-| Instalacja: `grant request permissions failed` | Podpis bez `--acls`. Wykonaj `oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO`, potem odinstaluj, zbuduj i zainstaluj ponownie. |
-| Build: brak plików w `signatures/` | Nie wykonano kroku 7.1 na tym komputerze. |
-| Build: `fatal error: 'models/models.h' file not found` | Klon sprzed poprawki, w którym brakowało `third_party/llama.cpp/src/models/`. Wykonaj `git pull`, potem `rm -rf entry/.cxx` i zbuduj ponownie. |
-| `oniro-app screenshot` pokazuje tylko ekran główny | Tak ma być: okno aplikacji działa w trybie prywatności (blokada zrzutów ekranu). |
-| Okna dialogowe pojawiają się z 1,5–3 s opóźnieniem | To normalne na emulatorze przy pierwszym otwarciu. |
-| PDF: „PDF preview is unavailable on this device” | Ograniczenie emulatora x86_64 (ArkWeb tylko dla arm64). Podgląd PDF działa na urządzeniu arm64. |
-| „The AI assistant is unavailable on this device” | Brak modelu w piaskownicy aplikacji. Wykonaj krok 9, a po każdym odinstalowaniu aplikacji powtórz `tools/push_model.sh`. |
-| `fetch_model.sh`: „Ollama is not installed” | Zainstaluj Ollamę (krok 9.1). |
-| `fetch_model.sh`: `could not connect to ollama server` / `Error: … connection refused` | Usługa Ollamy nie działa. Uruchom ją: `sudo systemctl start ollama`. |
-| `fetch_model.sh`: „Warning: qwen2.5:0.5b has changed…” | Ollama opublikowała nową wersję modelu, inną niż sprawdzona testem z kroku 10. Zwykle działa, ale warto uruchomić ten test. |
-| „Today” / „Yesterday” nie obejmują zdjęć demo | Data w emulatorze nie zgadza się z datami plików (4.10.2026), a strefa czasowa emulatora to Asia/Shanghai. Użyj własnego zakresu dat. |
-| Brak miejsca na dysku | Największy jest katalog `~/command-line-tools/sdk` (≈ 6 GB, HarmonyOS SDK niepotrzebny temu projektowi). Można go zastąpić dowiązaniem do toolchainu API 23: `rm -rf ~/command-line-tools/sdk && mkdir -p ~/command-line-tools/sdk/default/openharmony && ln -s ~/setup-ohos-sdk/linux/23/toolchains ~/command-line-tools/sdk/default/openharmony/toolchains`. |
+- PDF preview is unavailable on the tested x86_64 emulator. Rendering on an ARM64 device still needs verification.
+- Guest mode protects this app only. It does not stop the guest from opening other apps.
+- The app blocks system screenshots and screen recordings of its content.

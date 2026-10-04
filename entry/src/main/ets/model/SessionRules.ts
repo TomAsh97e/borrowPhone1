@@ -1,29 +1,10 @@
-export interface DisplaySize {
-  width: number;
-  height: number;
-}
+export const PIN_LENGTH = 4;
 
-export function hasValidSelection(uris: string[], limit: number): boolean {
-  if (uris.length < 1 || uris.length > limit) {
-    return false;
-  }
-  for (let index = 0; index < uris.length; index++) {
-    if (uris.indexOf(uris[index]) !== index) {
-      return false;
-    }
-  }
-  return true;
-}
+export type PresetKey = 'today' | 'yesterday' | 'weekend' | 'custom';
 
-export function fitSize(width: number, height: number, maxEdge: number): DisplaySize {
-  if (width < 1 || height < 1 || maxEdge < 1) {
-    throw new Error('Invalid image dimensions');
-  }
-  const scale = Math.min(1, maxEdge / Math.max(width, height));
-  return {
-    width: Math.max(1, Math.round(width * scale)),
-    height: Math.max(1, Math.round(height * scale))
-  };
+export interface TimeRange {
+  start: number;
+  end: number;
 }
 
 export function clampIndex(index: number, count: number): number {
@@ -31,7 +12,7 @@ export function clampIndex(index: number, count: number): number {
 }
 
 export function isValidPin(pin: string): boolean {
-  return /^\d{6}$/.test(pin);
+  return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(pin);
 }
 
 export function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -41,4 +22,47 @@ export function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean 
     difference |= (left[index] ?? 0) ^ (right[index] ?? 0);
   }
   return difference === 0;
+}
+
+export function startOfDay(time: number): number {
+  const date = new Date(time);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function addDays(dayStart: number, days: number): number {
+  const date = new Date(dayStart);
+  date.setDate(date.getDate() + days);
+  return date.getTime();
+}
+
+// Whole local days, inclusive; the order of the two days does not matter.
+export function dayRange(firstDay: number, lastDay: number): TimeRange {
+  const first = startOfDay(Math.min(firstDay, lastDay));
+  const last = startOfDay(Math.max(firstDay, lastDay));
+  return { start: first, end: addDays(last, 1) - 1 };
+}
+
+// "Weekend" is the most recent Saturday–Sunday, including the current one.
+export function presetRange(preset: PresetKey, now: number): TimeRange {
+  const today = startOfDay(now);
+  if (preset === 'yesterday') {
+    const yesterday = addDays(today, -1);
+    return dayRange(yesterday, yesterday);
+  }
+  if (preset === 'weekend') {
+    const daysSinceSaturday = (new Date(today).getDay() + 1) % 7;
+    const saturday = addDays(today, -daysSinceSaturday);
+    return dayRange(saturday, addDays(saturday, 1));
+  }
+  return dayRange(today, today);
+}
+
+export function isInRange(time: number, range: TimeRange): boolean {
+  return time >= range.start && time <= range.end;
+}
+
+// Media library timestamps are milliseconds; older records may hold seconds.
+export function normalizeTimestamp(value: number): number {
+  return value > 0 && value < 100000000000 ? value * 1000 : value;
 }

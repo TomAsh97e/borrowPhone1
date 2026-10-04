@@ -1,116 +1,106 @@
-# BorrowPhone
+# SafeShare (BorrowPhone)
 
-BorrowPhone is a native ArkTS/ArkUI MVP for Oniro/OpenHarmony. An owner selects one to five photos with the system picker, the app decodes bounded JPEG/PNG previews into RAM, and a guest can browse only that immutable selection.
+SafeShare is a native ArkTS/ArkUI app for OpenHarmony that implements the SafeShare Photo Vault design (Polish UI). The owner sees the phone gallery, picks a time period (today, yesterday, last weekend or a custom date range) and hands the phone over. The guest can browse only the photos taken in that period; leaving guest mode requires the owner's 4-digit PIN.
+
+## How it works
+
+- **Owner gallery**: every photo in the media library (up to 500, newest first) is shown in a 3-column grid. Photos outside the selected period are dimmed, blurred and marked with a lock. Tapping a photo shows its date, resolution and camera model (EXIF).
+- **Guest mode**: full-screen viewer with swipe, double-tap zoom, a filmstrip and a "+N" locked tile. Swiping past either end of the period shows a boundary notice instead of other photos.
+- **PIN**: created on the first hand-off, stored as a salted PBKDF2-SHA256 hash in app preferences (never displayed). Five wrong attempts lock PIN entry for 30 seconds. The PIN can be changed in Settings with the current PIN.
+- **Leaving the app**: the system Back button opens the PIN pad. Going to the home screen or another app turns the screen into a non-dismissable PIN lock. If the app is killed during a guest session, the next start opens straight into that lock.
+- **Settings**: light/dark theme, PIN change, leave alarm on/off, hide photo details from the guest.
+
+There is no network backend: the "backend" is the local media library (`photoAccessHelper`) plus app preferences.
 
 ## Security scope
 
 > **Viewer only. Other apps remain accessible.**
 
-This build does **not** provide whole-device confinement and must not be presented as a safe phone-handoff mode. The UI repeats this limitation. A managed kiosk integration is intentionally not included because the tested Oniro emulator is not provisioned for it.
+OpenHarmony does not let a normal app block the system Home/Recents gestures. A guest can still open other apps (including the system Gallery); SafeShare only locks itself. Whole-device confinement needs an MDM-provisioned device and is not implemented. The window runs in privacy mode, so system screenshots and recordings do not capture its content.
 
-Implemented protections:
-
-- no broad gallery read/write permission;
-- system photo picker limited to five images;
-- JPEG/PNG validation, 25 MiB and 50 MP input limits, and proportional decoding to a 1600 px maximum edge;
-- RAM-only `PixelMap` session; source handles and URIs are discarded after preparation;
-- internal read-only viewer with bounded Previous/Next controls;
-- fresh native system-PIN request for authenticated owner entry/return, without unlock-result reuse;
-- privacy-window mode before app content is loaded;
-- unexpected backgrounding clears the session and returns to a neutral locked screen;
-- cold starts never restore photos or authorization.
-
-The **unprotected MVP demo** button exists only so the viewer can be exercised on an emulator without an enrolled PIN. It is visibly labelled and returns to the locked screen rather than granting owner controls.
+The app requests `ohos.permission.READ_IMAGEVIDEO`. Its level is `system_basic` with `provisionEnable: true`, so the signing profile must list it in `acls.allowed-acls` (see below); the user still has to allow it in the system prompt.
 
 ## Tested environment
 
 | Item | Observed value |
 | --- | --- |
-| Runtime | Oniro emulator, OpenHarmony `6.1.0.31`, API 23 |
-| Compile SDK | OpenHarmony API 23 |
+| Runtime | OpenHarmony QEMU phone image (`~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone`), OpenHarmony `7.0.0.39`, API 26 |
+| Compile SDK | OpenHarmony API 23 (`oniro-app sdk install 6.1`) |
 | Minimum compatible SDK | API 20 |
-| CLI | `@oniroproject/oniro-app` 0.11.0 |
-| Hvigor | 5.18.5 |
+| CLI | `@oniroproject/oniro-app` 0.11.0 on Node.js 22 |
 | Bundle / ability | `org.hackyeah.borrowphone` / `EntryAbility` |
-
-The project uses one Stage-model entry HAP and no backend or third-party runtime dependency.
 
 ## Build and run
 
-Install Node.js 20+, a JDK, and `oniro-app`, then provision its OpenHarmony tools:
+Install Node.js 20+ (22 recommended), a JDK, and `oniro-app`:
 
 ```bash
 npm install -g @oniroproject/oniro-app
 oniro-app sdk install 6.1
 oniro-app cmdtools install
-oniro-app emulator install
+```
+
+Start the emulator (use `sg kvm -c "…"` if the session is not yet in the `kvm` group):
+
+```bash
+~/.ohos-qemu/openharmony-qemu-x86_64-x86_64_virt-phone/launch/linux.sh -r 720x1280
 ```
 
 From this repository:
 
 ```bash
-oniro-app sign .
+oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO   # once; re-signing creates new keys
 oniro-app build .
-oniro-app emulator start --wait-for-hdc 300  # omit if already running
+~/setup-ohos-sdk/linux/23/toolchains/hdc tconn 127.0.0.1:5555
 oniro-app app install .
 oniro-app app launch .
 ```
 
-The signed package is written to:
+Every `oniro-app sign` run generates new signing material, so an already installed copy must be uninstalled first (`oniro-app app uninstall org.hackyeah.borrowphone`), which also deletes the stored PIN.
 
-```text
-entry/build/default/outputs/default/entry-default-signed.hap
-```
+### Demo photos
 
-`oniro-app sign` generates local development signing material. Signing files, build outputs, IDE state and `local.properties` are ignored by Git.
-
-### Put demo photos in the Oniro emulator
-
-The picker needs media in the emulator library. With one emulator connected:
+The gallery needs photos with dates. Copy JPEG/PNG files (their EXIF `DateTimeOriginal` becomes the photo date) into the media library:
 
 ```bash
-oniro-app file send ./demo.jpg /data/local/tmp/demo.jpg
-~/setup-ohos-sdk/linux/23/toolchains/hdc shell \
-  mediatool send /data/local/tmp/demo.jpg
+~/setup-ohos-sdk/linux/23/toolchains/hdc file send ./photos /data/local/tmp/photos
+~/setup-ohos-sdk/linux/23/toolchains/hdc shell mediatool send /data/local/tmp/photos
 ```
-
-Repeat with up to eight harmless JPEG/PNG files, then open BorrowPhone and choose **Continue with unprotected MVP demo** → **Choose photos**.
-
-To test the real owner-authentication path, first configure a lock-screen PIN in the emulator/device settings. If no ATL3 PIN is enrolled, BorrowPhone fails closed and keeps owner controls locked.
 
 ## Checks
 
-Run the pure session-rule check:
+Run the date-range and PIN rule check:
 
 ```bash
-node tests/session_rules_test.mjs
+node tests/session_rules_test.mjs   # needs Node.js 22.18+ (imports a .ts file)
 ```
 
-Build and device checks performed on the environment above:
+Device checks performed on the environment above:
 
 | Check | Result |
 | --- | --- |
-| Session selection/scaling/index rules | Passed |
-| Sign/build from a clean source-only copy | Passed |
-| Signed HAP build | Passed |
-| Install and launch on Oniro | Passed |
-| Native picker displays three seeded photos | Passed |
-| Select two photos, decode sequentially, review and enter guest viewer | Passed for JPEG |
-| Screenshot while protected window is visible | App pixels hidden; capture showed the launcher |
-| Home during guest session, then relaunch | Returned locked; session discarded |
-| Native PIN with no enrolled emulator PIN | Failed closed with an unavailable message |
+| Permission prompt, gallery load, 3-column grid with locked photos | Passed |
+| Presets Today / Yesterday / Weekend and custom range (system date dialog) | Passed |
+| Photo detail with EXIF camera model | Passed |
+| Light/dark theme incl. system bar colors | Passed |
+| PIN creation with mismatching confirmation, then guest mode | Passed |
+| Guest swipe, boundary notices, filmstrip, zoom, details overlay | Passed |
+| Back button in guest mode → PIN pad | Passed |
+| Home during guest mode, return → non-dismissable PIN lock | Passed |
+| Force-stop during guest mode, relaunch → PIN lock, owner gallery hidden | Passed |
+| 5 wrong PINs → 30 s lockout, correct PIN rejected until it expires | Passed |
+| PIN change with wrong / correct current PIN | Passed |
 | Whole-device confinement | **Not implemented / not claimed** |
-| Fingerprint, PNG, corrupt/oversized input, recording/Recents and physical hardware | Not yet tested |
 
 ## Project map
 
-- `entry/src/main/ets/pages/Index.ets` — MVP state, picker/import flow, authentication and UI.
-- `entry/src/main/ets/entryability/EntryAbility.ets` — privacy-window setup and lifecycle invalidation.
-- `entry/src/main/ets/model/SessionRules.ts` — bounded selection, scaling and index rules.
+- `entry/src/main/ets/pages/Index.ets` — screens and state: owner gallery, period filter, photo detail, settings, guest viewer, PIN pad.
+- `entry/src/main/ets/service/AppStore.ets` — PIN hash, lockout, settings and guest-session flag in preferences.
+- `entry/src/main/ets/service/Gallery.ets` — gallery permission, media library query, EXIF camera model.
+- `entry/src/main/ets/service/Haptics.ets` — vibration feedback.
+- `entry/src/main/ets/common/` — theme palettes and Polish date formatting.
+- `entry/src/main/ets/model/SessionRules.ts` — date ranges, PIN format and index rules.
+- `entry/src/main/ets/entryability/EntryAbility.ets` — privacy window and background detection.
 - `tests/session_rules_test.mjs` — runnable lightweight check.
-- [`01_ARCHITECTURE.md`](01_ARCHITECTURE.md) through [`05_HACKATHON_COMPLIANCE.md`](05_HACKATHON_COMPLIANCE.md) — design, threat model, API map, validation backlog and contest fit.
+- [`01_ARCHITECTURE.md`](01_ARCHITECTURE.md) through [`05_HACKATHON_COMPLIANCE.md`](05_HACKATHON_COMPLIANCE.md) — design notes for the earlier picker-based MVP.
 - [`AI_WORKFLOW.md`](AI_WORKFLOW.md) — AI-use disclosure.
-
-## MVP limitations
-
-No kiosk/MDM integration, video, zoom, files, notes, persistence, sharing, cloud service, analytics or custom PIN database is included. Add containment only for a named, provisioned device after Home/Recents/notification/call/crash tests pass; until then this remains a selected-photo viewer, not whole-phone protection.

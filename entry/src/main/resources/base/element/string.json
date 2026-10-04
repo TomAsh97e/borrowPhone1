@@ -2,15 +2,19 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "Temporary selected-photo viewer"
+      "value": "Pokazywanie zdjęć tylko z wybranego okresu"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "BorrowPhone selected-photo viewer"
+      "value": "SafeShare: galeria z trybem gościa chronionym kodem PIN"
     },
     {
       "name": "EntryAbility_label",
-      "value": "BorrowPhone"
+      "value": "SafeShare"
+    },
+    {
+      "name": "read_photos_reason",
+      "value": "Pokazanie zdjęć z galerii według daty wykonania"
     }
   ]
 }

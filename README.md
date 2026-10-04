@@ -1,4 +1,55 @@
-# SafeShare (BorrowPhone)
+# SafeShare
+
+**Show the moment, not your whole phone.**
+
+SafeShare turns an OpenHarmony phone into a temporary, PIN-protected viewer. You pick what the guest may see (a period, a sentence or single photos), hand the phone over and walk away. They can browse only that set; everything else stays locked.
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=VIDEO_ID"><img src="docs/media/video-thumbnail.jpg" alt="SafeShare demo video" width="720"></a>
+</p>
+
+<p align="center">
+  <b><a href="https://www.youtube.com/watch?v=VIDEO_ID">▶ Watch the 2-minute demo on YouTube</a></b> · <a href="docs/SafeShare_presentation.pdf">Presentation (PDF, 5 slides)</a>
+</p>
+
+## The problem
+
+When you hand your phone to someone to show one photo, nothing stops them from swiping to the next one: a private picture, a screenshot of a document, a PDF you'd rather keep to yourself. Hidden albums and extra user profiles take too long to set up in the middle of a conversation. So people hover over the screen, refuse to let go of the phone, or just hope the other person won't swipe.
+
+## How SafeShare solves it
+
+| 1 · You choose | 2 · They see only that | 3 · PIN to leave |
+| --- | --- | --- |
+| A period (today, yesterday, last weekend, a date range), a sentence such as *"photos and PDFs from the weekend"*, or single taps. | A viewer that holds only the chosen photos, notes and PDFs. Swiping past either end shows a boundary notice; everything else is just a locked count. | Back, Home, switching apps or killing the app all end at the owner's PIN. |
+
+You can leave the phone with a friend and do something else: no hovering, no watching every swipe.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/owner-period.png" width="170" alt="Owner picks a period"><br><sub><b>Pick a period</b><br>live visible / hidden count</sub></td>
+    <td align="center"><img src="docs/media/ai-proposal.png" width="170" alt="On-device AI proposal"><br><sub><b>Or say it in words</b><br>on-device AI, approve first</sub></td>
+    <td align="center"><img src="docs/media/ai-rejected.png" width="170" alt="Injection attempt rejected"><br><sub><b>Off-topic input rejected</b><br>the model can only fill in a period</sub></td>
+    <td align="center"><img src="docs/media/guest-boundary.png" width="170" alt="Guest viewer boundary notice"><br><sub><b>Guest sees only that set</b><br>boundary notice, "+2" locked</sub></td>
+    <td align="center"><img src="docs/media/exit-lock.png" width="170" alt="PIN lock after leaving the app"><br><sub><b>Home → PIN lock</b><br>no way out without the PIN</sub></td>
+  </tr>
+</table>
+
+## Highlights
+
+- **One-tap periods**: today, yesterday, last weekend or any date range.
+- **Say it in words**: a small language model running entirely on the phone turns a sentence into a proposal. Nothing changes until the owner taps *Approve*.
+- **Photo by photo**: tap to add or hide single photos; notes and PDFs are shared the same way.
+- **Guest viewer**: swipe, zoom and filmstrip, limited to the shared items.
+- **PIN lock**: salted PBKDF2 hash, 30-second lockout after five wrong attempts.
+- **Private by design**: screenshots and screen recordings skip the window. No account, no network, no cloud.
+
+> **Honest scope:** SafeShare locks itself, not the whole phone. OpenHarmony doesn't let a regular app block the Home gesture, so full-device lockdown would need an MDM-managed device. Details in [Security scope](#security-scope).
+
+Want to run it? See [Build and run](#build-and-run) or the step-by-step Linux guide [`SETUP_LINUX.md`](SETUP_LINUX.md) (in Polish).
+
+---
+
+## Technical overview
 
 SafeShare is a native ArkTS/ArkUI app for OpenHarmony that implements the SafeShare Photo Vault design (English UI). The owner sees the phone gallery plus imported notes and PDFs, picks a time period (today, yesterday, last weekend, a custom date range, or a period described in words and interpreted by an on-device model) and hands the phone over. The guest can browse only the photos, notes and PDFs from that period; leaving guest mode requires the owner's 4-digit PIN.
 

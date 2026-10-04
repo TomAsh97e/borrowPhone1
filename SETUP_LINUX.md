@@ -4,7 +4,9 @@ This guide is for **Ubuntu 24.04 on an x86_64 computer**. It runs the app in an 
 
 You need about **25 GB of free disk space**, an internet connection, and preferably **16 GB of RAM**. Enable CPU virtualization (Intel VT-x or AMD-V) in BIOS/UEFI. The optional AI setup needs a few more GB.
 
-If the tools are already installed, go to [Start the emulator](#4-start-the-emulator). If you already have the project, use its existing folder instead of cloning it again.
+For a new computer, follow steps 1–7. If the tools are already installed, go to [Start the emulator](#4-start-the-emulator). To update an existing clone, see [Update or run an existing clone](#8-update-or-run-an-existing-clone).
+
+You can clone the project into any folder. All project commands below run from the repository root: the folder containing `README.md`, `build-profile.json5`, and `tools/`. `$HOME` and `~` refer to your own home folder; no specific username or project location is required.
 
 ## 1. Install system tools
 
@@ -84,6 +86,8 @@ If the emulator is already running, use that instance. Do not start a second one
 In **terminal 2**, connect to it:
 
 ```bash
+source "$HOME/.nvm/nvm.sh"
+nvm use 22
 export PATH="$HOME/setup-ohos-sdk/linux/23/toolchains:$PATH"
 hdc tconn 127.0.0.1:5555
 hdc list targets
@@ -96,19 +100,17 @@ Run the remaining commands in terminal 2.
 
 ## 5. Get the project and run it
 
-If you do not have the project yet:
+For a new clone, open a terminal in any folder where you want to keep the project, then run:
 
 ```bash
-mkdir -p ~/projects
-cd ~/projects
 git clone https://github.com/TomAsh97e/borrowPhone1.git
 cd borrowPhone1
 ```
 
-If you already have it, open that folder instead. For example, on the current development computer:
+For an existing clone, open a terminal inside it. This command moves to its root from any subfolder:
 
 ```bash
-cd /home/ludek/projects/drones/borrowPhone1
+cd "$(git rev-parse --show-toplevel)"
 ```
 
 Create the signing files, build, install, and launch:
@@ -177,24 +179,37 @@ oniro-app build .
 
 Do not use `--bundle` for this emulator: its data partition is too small for installation with the extra model copies.
 
-## 8. Run it again later
+## 8. Update or run an existing clone
 
-Start the emulator as shown in step 4. In another terminal, open your project folder and run:
+Start the emulator as shown in step 4. Open another terminal inside your existing clone and prepare it:
 
 ```bash
+cd "$(git rev-parse --show-toplevel)"
+source "$HOME/.nvm/nvm.sh"
+nvm use 22
+export PATH="$HOME/setup-ohos-sdk/linux/23/toolchains:$PATH"
 hdc tconn 127.0.0.1:5555
-oniro-app app launch .
 ```
 
-After changing the code, rebuild and install before launching:
+To download the latest code and run it:
 
 ```bash
+git pull --ff-only
+oniro-app sign . --bootstrap --acls ohos.permission.READ_IMAGEVIDEO
 oniro-app build .
 oniro-app app install .
 oniro-app app launch .
 ```
 
-You do not need to sign again or download the model again.
+If `git pull` fails, resolve the reported Git issue before continuing. Keep your local signing files and signing configuration; do not discard them to force an update.
+
+`--bootstrap` reuses your signing files. Updating the app with the same signature keeps its data and model. After editing code locally, use the same build, install, and launch commands without `git pull`.
+
+To open the already installed app without updating or rebuilding:
+
+```bash
+oniro-app app launch .
+```
 
 ## Optional checks
 

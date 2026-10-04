@@ -2,11 +2,11 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "Pokazywanie zdjęć tylko z wybranego okresu"
+      "value": "Show photos only from the selected period"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "SafeShare: galeria z trybem gościa chronionym kodem PIN"
+      "value": "SafeShare: gallery with PIN-protected guest mode"
     },
     {
       "name": "EntryAbility_label",
@@ -14,7 +14,7 @@
     },
     {
       "name": "read_photos_reason",
-      "value": "Pokazanie zdjęć z galerii według daty wykonania"
+      "value": "Show gallery photos by date taken"
     }
   ]
 }

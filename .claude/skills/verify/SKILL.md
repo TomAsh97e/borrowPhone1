@@ -33,7 +33,7 @@ Re-running `oniro-app sign . --acls ohos.permission.READ_IMAGEVIDEO` makes new k
   from QEMU's VNC (127.0.0.1:5921) with a minimal RFB client (raw encoding, BGRX 32 bpp).
 - Overlays and dialogs take 1.5–3 s to appear on first open; wait before concluding something did not render.
 - Seed photos with EXIF DateTimeOriginal: `hdc file send dir /data/local/tmp/seed` then `hdc shell mediatool send /data/local/tmp/seed`.
-- Device time zone is Asia/Shanghai; "Dzisiaj"/"Wczoraj" follow device local time.
+- Device time zone is Asia/Shanghai; "Today"/"Yesterday" follow device local time.
 
 ## Flows worth driving
 Permission prompt → grid; presets + custom range; detail (EXIF camera); hand-off → PIN create (mismatch, then match);

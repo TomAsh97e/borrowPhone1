@@ -87,6 +87,14 @@ export function togglePick(uri: string, inRange: boolean, picks: ManualPicks): M
   return { added: added, removed: removed };
 }
 
+export function hidePick(uri: string, inRange: boolean, picks: ManualPicks): ManualPicks {
+  const removed = picks.removed.filter((item: string) => item !== uri);
+  if (inRange) {
+    removed.push(uri);
+  }
+  return { added: picks.added.filter((item: string) => item !== uri), removed: removed };
+}
+
 // Media library timestamps are milliseconds; older records may hold seconds.
 export function normalizeTimestamp(value: number): number {
   return value > 0 && value < 100000000000 ? value * 1000 : value;

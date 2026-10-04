@@ -1,18 +1,24 @@
 import { common } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
-import { formatDateTime, formatDay, formatRangeShort } from '../common/Format';
+import { formatCount, formatDateTime, formatDay, formatRangeShort, formatSize, kindLabel } from '../common/Format';
 import { AMBER, DANGER, DARK, EMERALD, LIGHT, Palette } from '../common/Theme';
 import {
-  dayRange, isInRange, isShared, isValidPin, ManualPicks, PIN_LENGTH, PresetKey, presetRange, startOfDay, TimeRange,
-  togglePick
+  dayRange, hidePick, isInRange, isShared, isValidPin, ManualPicks, PIN_LENGTH, PresetKey, presetRange, startOfDay,
+  TimeRange, togglePick
 } from '../model/SessionRules';
+import { PdfView } from '../components/PdfView';
+import { ALL_KINDS, ItemKind } from '../model/Documents';
+import { MAX_REQUEST_LENGTH, RangeProposal } from '../model/TextRange';
 import { AppStore, PinCheck } from '../service/AppStore';
 import { GalleryPhoto, loadPhotos, readCameraModel, requestGalleryAccess } from '../service/Gallery';
 import { hapticAlarm, hapticLock, hapticTap, hapticUnlock } from '../service/Haptics';
+import { AssistantResult, proposeRange, releaseAssistant } from '../service/RangeAssistant';
+import { ImportResult, importDocuments, loadVault, readNote, removeDocument, VaultItem } from '../service/Vault';
 
 const BOUNDARY_ALERT_MS = 3000;
 const SWIPE_DISTANCE = 40;
 const ZOOM_SCALE = 1.5;
+const PROPOSAL_THUMBS = 5;
 
 enum Access {
   LOADING,
@@ -47,10 +53,10 @@ class PresetOption {
 }
 
 const PRESET_ROWS: PresetOption[][] = [
-  [new PresetOption('today', 'Dzisiaj', $r('sys.symbol.calendar'), '#EF4444', 'Bieżący dzień'),
-    new PresetOption('yesterday', 'Wczoraj', $r('sys.symbol.clock'), '#60A5FA', 'Poprzedni dzień')],
-  [new PresetOption('weekend', 'Weekend', $r('sys.symbol.sunset_fill'), '#F97316', 'Ostatni weekend'),
-    new PresetOption('custom', 'Własny zakres', $r('sys.symbol.slider_horizontal_2'), '#A1A1AA', 'Wybierz daty')]
+  [new PresetOption('today', 'Today', $r('sys.symbol.calendar'), '#EF4444', 'Current day'),
+    new PresetOption('yesterday', 'Yesterday', $r('sys.symbol.clock'), '#60A5FA', 'Previous day')],
+  [new PresetOption('weekend', 'Weekend', $r('sys.symbol.sunset_fill'), '#F97316', 'Last weekend'),
+    new PresetOption('custom', 'Custom range', $r('sys.symbol.slider_horizontal_2'), '#A1A1AA', 'Select dates')]
 ];
 
 const KEYPAD_ROWS: string[][] = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9']];
@@ -71,6 +77,24 @@ struct Index {
   @State private customStart: number = startOfDay(Date.now());
   @State private customEnd: number = startOfDay(Date.now());
   @State private picks: ManualPicks = { added: [], removed: [] };
+  @State private shareKinds: ItemKind[] = ALL_KINDS.slice();
+  @State private ownerTab: ItemKind = 'photo';
+
+  // Imported notes and PDFs.
+  @State private documents: VaultItem[] = [];
+  @State private importBusy: boolean = false;
+  @State private importMessage: string = '';
+  @State private docPreview: VaultItem | null = null;
+  @State private docPreviewText: string = '';
+  @State private confirmDelete: boolean = false;
+  @State private ownerViewport: number = 0;
+
+  // Text-described period: the assistant only proposes, the owner approves.
+  @State private assistantText: string = '';
+  @State private assistantBusy: boolean = false;
+  @State private assistantMessage: string = '';
+  @State private proposal: RangeProposal | null = null;
+  @State private proposalExcluded: string[] = [];
 
   @State private darkTheme: boolean = true;
   @State private preventLeave: boolean = true;
@@ -98,6 +122,11 @@ struct Index {
 
   @State private guestMode: boolean = false;
   @State private guestPhotos: GalleryPhoto[] = [];
+  @State private guestDocs: VaultItem[] = [];
+  @State private guestTab: ItemKind = 'photo';
+  @State private guestDoc: VaultItem | null = null;
+  @State private guestNote: string = '';
+  @State private lockedDocs: number = 0;
   @State private guestIndex: number = 0;
   @State private guestZoom: number = 1;
   @State private guestInfoOpen: boolean = false;
@@ -108,6 +137,7 @@ struct Index {
 
   private store: AppStore = new AppStore();
   private pinFirst: string = '';
+  private assistantRequest: number = 0;
   private boundaryTimer: number = -1;
 
   aboutToAppear(): void {
@@ -138,11 +168,15 @@ struct Index {
       }
       hapticAlarm();
       this.openPin(PinMode.EXIT,
-        'Próba cofnięcia / wyjścia z galerii została zablokowana! Wymagany kod PIN właściciela.');
+        'Back/exit attempt blocked! The owner PIN is required.');
       return true;
     }
     if (this.detailIndex >= 0) {
       this.detailIndex = -1;
+      return true;
+    }
+    if (this.docPreview !== null) {
+      this.docPreview = null;
       return true;
     }
     if (this.settingsOpen) {
@@ -159,7 +193,7 @@ struct Index {
     }
     this.guestInfoOpen = false;
     hapticAlarm();
-    this.openPin(PinMode.PANIC, 'Wykryto przełączenie aplikacji lub próbę zminimalizowania! Ekran został zablokowany.');
+    this.openPin(PinMode.PANIC, 'App switch or minimize attempt detected! The screen has been locked.');
   }
 
   private context(): common.UIAbilityContext {
@@ -177,14 +211,20 @@ struct Index {
       if (this.store.guestActive) {
         // A guest session was cut short (app killed or device rebooted): owner PIN first.
         this.guestPhotos = [];
+        this.guestDocs = [];
         this.guestMode = true;
         this.setImmersive(true);
-        this.openPin(PinMode.RESUME, 'Sesja gościa została przerwana. Wprowadź kod PIN właściciela, aby wrócić do galerii.');
+        this.openPin(PinMode.RESUME, 'The guest session was interrupted. Enter the owner PIN to return to the gallery.');
       }
     } catch (error) {
       this.storeError = true;
     }
     this.applySystemBars();
+    try {
+      this.documents = await loadVault(this.context());
+    } catch (error) {
+      this.importMessage = 'Could not load notes and PDFs.';
+    }
     await this.refreshGallery(false);
   }
 
@@ -226,30 +266,63 @@ struct Index {
     return this.preset === 'custom' ? dayRange(this.customStart, this.customEnd) : presetRange(this.preset, Date.now());
   }
 
+  // Photos, notes and PDFs share one rule: the kind is enabled, then period plus manual picks.
+  private itemShared(kind: ItemKind, uri: string, time: number, range: TimeRange): boolean {
+    return this.shareKinds.includes(kind) && isShared(uri, isInRange(time, range), this.picks);
+  }
+
+  private itemManual(kind: ItemKind, uri: string, time: number): boolean {
+    return this.shareKinds.includes(kind) && this.itemShared(kind, uri, time, this.range()) !==
+      isInRange(time, this.range());
+  }
+
   private isAllowed(photo: GalleryPhoto): boolean {
-    return isShared(photo.uri, isInRange(photo.takenAt, this.range()), this.picks);
+    return this.itemShared('photo', photo.uri, photo.takenAt, this.range());
   }
 
   private isManual(photo: GalleryPhoto): boolean {
-    return this.isAllowed(photo) !== isInRange(photo.takenAt, this.range());
+    return this.itemManual('photo', photo.uri, photo.takenAt);
+  }
+
+  private isDocAllowed(doc: VaultItem): boolean {
+    return this.itemShared(doc.kind, doc.path, doc.createdAt, this.range());
+  }
+
+  private isDocManual(doc: VaultItem): boolean {
+    return this.itemManual(doc.kind, doc.path, doc.createdAt);
   }
 
   private allowedPhotos(): GalleryPhoto[] {
     const range = this.range();
-    return this.photos.filter((photo: GalleryPhoto) => isShared(photo.uri, isInRange(photo.takenAt, range), this.picks));
+    return this.photos.filter((photo: GalleryPhoto) => this.itemShared('photo', photo.uri, photo.takenAt, range));
+  }
+
+  private allowedDocs(): VaultItem[] {
+    const range = this.range();
+    return this.documents.filter((doc: VaultItem) => this.itemShared(doc.kind, doc.path, doc.createdAt, range));
+  }
+
+  private docsOf(kind: ItemKind): VaultItem[] {
+    return this.documents.filter((doc: VaultItem) => doc.kind === kind);
   }
 
   private allowedCount(): number {
-    return this.allowedPhotos().length;
+    return this.allowedPhotos().length + this.allowedDocs().length;
   }
 
-  // Only picks that change something in the current period count.
+  private totalCount(): number {
+    return this.photos.length + this.documents.length;
+  }
+
+  // Only picks that change something in the current period count, for enabled kinds.
   private manualCount(added: boolean): number {
     const range = this.range();
-    return this.photos.filter((photo: GalleryPhoto) => {
-      const inRange = isInRange(photo.takenAt, range);
-      return inRange !== added && isShared(photo.uri, inRange, this.picks) === added;
-    }).length;
+    const counts = (kind: ItemKind, uri: string, time: number): boolean => {
+      const inRange = isInRange(time, range);
+      return this.shareKinds.includes(kind) && inRange !== added && isShared(uri, inRange, this.picks) === added;
+    };
+    return this.photos.filter((photo: GalleryPhoto) => counts('photo', photo.uri, photo.takenAt)).length +
+      this.documents.filter((doc: VaultItem) => counts(doc.kind, doc.path, doc.createdAt)).length;
   }
 
   private hasManualPicks(): boolean {
@@ -261,6 +334,72 @@ struct Index {
     this.picks = togglePick(photo.uri, isInRange(photo.takenAt, this.range()), this.picks);
   }
 
+  private toggleDoc(doc: VaultItem): void {
+    if (!this.shareKinds.includes(doc.kind)) {
+      return;
+    }
+    hapticTap();
+    this.picks = togglePick(doc.path, isInRange(doc.createdAt, this.range()), this.picks);
+  }
+
+  private toggleKind(kind: ItemKind): void {
+    hapticTap();
+    this.shareKinds = this.shareKinds.includes(kind) ? this.shareKinds.filter((item: ItemKind) => item !== kind) :
+      ALL_KINDS.filter((item: ItemKind) => item === kind || this.shareKinds.includes(item));
+  }
+
+  private async importKind(kind: ItemKind): Promise<void> {
+    if (this.importBusy) {
+      return;
+    }
+    this.importBusy = true;
+    this.importMessage = '';
+    let result = new ImportResult(this.documents, '');
+    try {
+      result = await importDocuments(this.context(), kind, this.documents);
+    } catch (error) {
+      result = new ImportResult(this.documents, 'Could not import files.');
+    }
+    this.importBusy = false;
+    if (!this.guestMode) {
+      this.documents = result.items;
+      this.importMessage = result.message;
+    }
+  }
+
+  private async openDocPreview(doc: VaultItem): Promise<void> {
+    this.docPreview = doc;
+    this.docPreviewText = '';
+    this.confirmDelete = false;
+    if (doc.kind === 'note') {
+      try {
+        const text = await readNote(doc);
+        if (this.docPreview !== null && this.docPreview.id === doc.id) {
+          this.docPreviewText = text;
+        }
+      } catch (error) {
+        this.docPreviewText = 'Could not read the note.';
+      }
+    }
+  }
+
+  private async deleteDoc(doc: VaultItem): Promise<void> {
+    if (!this.confirmDelete) {
+      this.confirmDelete = true;
+      return;
+    }
+    try {
+      this.documents = await removeDocument(this.context(), this.documents, doc.id);
+      this.picks = {
+        added: this.picks.added.filter((uri: string) => uri !== doc.path),
+        removed: this.picks.removed.filter((uri: string) => uri !== doc.path)
+      };
+      this.docPreview = null;
+    } catch (error) {
+      this.importMessage = 'Could not delete the file.';
+    }
+  }
+
   private resetPicks(): void {
     hapticTap();
     this.picks = { added: [], removed: [] };
@@ -268,10 +407,10 @@ struct Index {
 
   private rangeLabel(): string {
     if (this.preset === 'today') {
-      return 'Dzisiaj';
+      return 'Today';
     }
     if (this.preset === 'yesterday') {
-      return 'Wczoraj';
+      return 'Yesterday';
     }
     if (this.preset === 'weekend') {
       return 'Weekend';
@@ -280,7 +419,7 @@ struct Index {
   }
 
   private canHandOff(): boolean {
-    return this.storeReady && this.privacyReady && this.access === Access.GRANTED && this.allowedCount() > 0;
+    return this.storeReady && this.privacyReady && this.allowedCount() > 0;
   }
 
   private selectPreset(key: PresetKey): void {
@@ -306,6 +445,124 @@ struct Index {
         }
       }
     });
+  }
+
+  // ---- Text period assistant ---------------------------------------------------------------
+
+  private async askAssistant(): Promise<void> {
+    if (this.assistantBusy) {
+      return;
+    }
+    hapticTap();
+    this.getUIContext().getFocusController().clearFocus(); // hide the keyboard over the result
+    const request = ++this.assistantRequest;
+    this.assistantBusy = true;
+    this.assistantMessage = '';
+    this.proposal = null;
+    this.proposalExcluded = [];
+    let result = new AssistantResult(null, '');
+    try {
+      result = await proposeRange(this.context(), this.assistantText, Date.now());
+    } catch (error) {
+      result = new AssistantResult(null, 'The AI assistant encountered an error. Select a period using the buttons.');
+    }
+    if (request !== this.assistantRequest) {
+      return; // superseded or cancelled by a hand-off
+    }
+    this.assistantBusy = false;
+    this.proposal = result.proposal;
+    this.assistantMessage = result.message;
+  }
+
+  // A proposal or message about older text must not stay approvable.
+  private editAssistantText(value: string): void {
+    if (value !== this.assistantText) {
+      this.assistantText = value;
+      this.cancelAssistant();
+    }
+  }
+
+  private cancelAssistant(): void {
+    this.assistantRequest++;
+    this.assistantBusy = false;
+    this.assistantMessage = '';
+    this.proposal = null;
+    this.proposalExcluded = [];
+  }
+
+  private excludeFromProposal(uri: string): void {
+    hapticTap();
+    this.proposalExcluded = this.proposalExcluded.concat(uri);
+  }
+
+  private approveProposal(): void {
+    const proposal = this.proposal;
+    if (proposal === null) {
+      return;
+    }
+    hapticTap();
+    let picks = this.picks;
+    this.photos.filter((photo: GalleryPhoto) => this.proposalExcluded.includes(photo.uri)).forEach(
+      (photo: GalleryPhoto) => {
+        picks = hidePick(photo.uri, isInRange(photo.takenAt, proposal.range), picks);
+      });
+    this.documents.filter((doc: VaultItem) => this.proposalExcluded.includes(doc.path)).forEach(
+      (doc: VaultItem) => {
+        picks = hidePick(doc.path, isInRange(doc.createdAt, proposal.range), picks);
+      });
+    this.picks = picks;
+    if (proposal.preset === 'custom') {
+      this.customStart = startOfDay(proposal.range.start);
+      this.customEnd = startOfDay(proposal.range.end);
+    }
+    this.preset = proposal.preset;
+    this.shareKinds = proposal.kinds.slice();
+    this.proposal = null;
+    this.proposalExcluded = [];
+    this.assistantText = '';
+  }
+
+  // Items the guest would see after approval, including the owner's manual picks.
+  private proposalPhotos(): GalleryPhoto[] {
+    const proposal = this.proposal;
+    if (proposal === null || !proposal.kinds.includes('photo')) {
+      return [];
+    }
+    return this.photos.filter((photo: GalleryPhoto) => !this.proposalExcluded.includes(photo.uri) &&
+      isShared(photo.uri, isInRange(photo.takenAt, proposal.range), this.picks));
+  }
+
+  private proposalDocs(kind: ItemKind): VaultItem[] {
+    const proposal = this.proposal;
+    if (proposal === null || !proposal.kinds.includes(kind)) {
+      return [];
+    }
+    return this.docsOf(kind).filter((doc: VaultItem) => !this.proposalExcluded.includes(doc.path) &&
+      isShared(doc.path, isInRange(doc.createdAt, proposal.range), this.picks));
+  }
+
+  private proposalSummary(): string {
+    const proposal = this.proposal;
+    if (proposal === null) {
+      return '';
+    }
+    return proposal.kinds.map((kind: ItemKind) => formatCount(kind,
+      kind === 'photo' ? this.proposalPhotos().length : this.proposalDocs(kind).length)).join(' · ');
+  }
+
+  private proposalEmpty(): boolean {
+    return this.proposalPhotos().length + this.proposalDocs('note').length + this.proposalDocs('pdf').length === 0;
+  }
+
+  private proposalLabel(): string {
+    const proposal = this.proposal;
+    if (proposal === null) {
+      return '';
+    }
+    if (proposal.preset === 'custom') {
+      return formatRangeShort(proposal.range);
+    }
+    return proposal.preset === 'today' ? 'Today' : proposal.preset === 'yesterday' ? 'Yesterday' : 'Weekend';
   }
 
   private async setImmersive(enabled: boolean): Promise<void> {
@@ -340,7 +597,7 @@ struct Index {
     }
     hapticTap();
     if (!this.store.hasPin()) {
-      this.openPin(PinMode.CREATE, 'Wybierz 4-cyfrowy kod. Będzie potrzebny, aby wyjść z trybu gościa.');
+      this.openPin(PinMode.CREATE, 'Choose a 4-digit code. It will be required to exit guest mode.');
       return;
     }
     this.enterGuest();
@@ -348,12 +605,21 @@ struct Index {
 
   private enterGuest(): void {
     const allowed = this.allowedPhotos();
-    if (allowed.length === 0) {
+    const docs = this.allowedDocs();
+    if (allowed.length + docs.length === 0) {
       return;
     }
+    this.cancelAssistant();
+    releaseAssistant();
     this.guestPhotos = allowed;
+    this.guestDocs = docs;
+    this.guestTab = allowed.length > 0 ? 'photo' : docs[0].kind;
+    this.guestDoc = null;
+    this.guestNote = '';
+    this.docPreview = null;
     this.lockedCount = this.photos.length - allowed.length;
-    this.guestRangeLabel = this.manualCount(true) > 0 ? `${this.rangeLabel()} + wybrane` : this.rangeLabel();
+    this.lockedDocs = this.documents.length - docs.length;
+    this.guestRangeLabel = this.manualCount(true) > 0 ? `${this.rangeLabel()} + selected` : this.rangeLabel();
     this.guestIndex = 0;
     this.guestZoom = 1;
     this.guestInfoOpen = false;
@@ -371,6 +637,9 @@ struct Index {
     clearTimeout(this.boundaryTimer);
     this.guestMode = false;
     this.guestPhotos = [];
+    this.guestDocs = [];
+    this.guestDoc = null;
+    this.guestNote = '';
     this.guestInfoOpen = false;
     this.boundaryAlert = '';
     this.setImmersive(false);
@@ -378,6 +647,35 @@ struct Index {
     this.store.setGuestActive(false).catch(() => {});
     if (this.access === Access.GRANTED) {
       this.reloadPhotos();
+    }
+  }
+
+  // Tabs the guest can open: only kinds with shared items.
+  private guestKinds(): ItemKind[] {
+    return ALL_KINDS.filter((kind: ItemKind) => kind === 'photo' ? this.guestPhotos.length > 0 :
+      this.guestDocs.some((doc: VaultItem) => doc.kind === kind));
+  }
+
+  private showGuestTab(kind: ItemKind): void {
+    hapticTap();
+    this.guestTab = kind;
+    this.guestDoc = null;
+    this.guestInfoOpen = false;
+  }
+
+  private async openGuestDoc(doc: VaultItem): Promise<void> {
+    hapticTap();
+    this.guestNote = '';
+    this.guestDoc = doc;
+    if (doc.kind === 'note') {
+      try {
+        const text = await readNote(doc);
+        if (this.guestDoc !== null && this.guestDoc.id === doc.id) {
+          this.guestNote = text;
+        }
+      } catch (error) {
+        this.guestNote = 'Could not read the note.';
+      }
     }
   }
 
@@ -398,7 +696,7 @@ struct Index {
       this.showGuestPhoto(this.guestIndex + 1);
     } else {
       hapticAlarm();
-      this.showBoundary(`Koniec udostępnionych zdjęć z tego okresu. Pozostałe ${this.lockedCount} zdjęć w galerii jest zablokowane.`);
+      this.showBoundary(`End of shared photos from this period. The remaining ${this.lockedCount} gallery photos are locked.`);
     }
   }
 
@@ -408,7 +706,7 @@ struct Index {
       this.showGuestPhoto(this.guestIndex - 1);
     } else {
       hapticAlarm();
-      this.showBoundary('Brak wcześniejszych zdjęć w wybranym przedziale. Reszta galerii jest bezpiecznie ukryta.');
+      this.showBoundary('There are no earlier photos in the selected range. The rest of the gallery is safely hidden.');
     }
   }
 
@@ -456,7 +754,7 @@ struct Index {
     this.pinFeedback = '';
     const seconds = this.store.lockSecondsLeft();
     if (seconds > 0 && mode !== PinMode.CREATE) {
-      this.pinFeedback = `Zbyt wiele błędnych prób. Spróbuj ponownie za ${seconds} s.`;
+      this.pinFeedback = `Too many failed attempts. Try again in ${seconds} s.`;
     }
   }
 
@@ -478,15 +776,15 @@ struct Index {
   private pinTitle(): string {
     switch (this.pinMode) {
       case PinMode.CREATE:
-        return 'Ustaw kod PIN';
+        return 'Set PIN';
       case PinMode.CONFIRM:
-        return 'Powtórz kod PIN';
+        return 'Repeat PIN';
       case PinMode.PANIC:
-        return 'Wykryto próbę wyjścia!';
+        return 'Exit attempt detected!';
       case PinMode.RESUME:
-        return 'Galeria jest zablokowana';
+        return 'Gallery locked';
       default:
-        return 'Wyjście z Trybu Gościa';
+        return 'Exit Guest Mode';
     }
   }
 
@@ -494,7 +792,7 @@ struct Index {
     if (this.pinMessage.length > 0) {
       return this.pinMessage;
     }
-    return 'Wprowadź kod PIN właściciela, aby odblokować resztę galerii telefonu.';
+    return 'Enter the owner PIN to unlock the rest of the phone gallery.';
   }
 
   private pressDigit(digit: string): void {
@@ -524,7 +822,7 @@ struct Index {
       this.pinFirst = pin;
       this.pinEntry = '';
       this.pinMode = PinMode.CONFIRM;
-      this.pinMessage = 'Wpisz ten sam kod jeszcze raz.';
+      this.pinMessage = 'Enter the same code again.';
       return;
     }
     if (this.pinMode === PinMode.CONFIRM) {
@@ -543,13 +841,13 @@ struct Index {
         this.closePin();
         this.exitGuest();
       } else if (result === PinCheck.LOCKED) {
-        this.rejectPin(`Zbyt wiele błędnych prób. Spróbuj ponownie za ${this.store.lockSecondsLeft()} s.`);
+        this.rejectPin(`Too many failed attempts. Try again in ${this.store.lockSecondsLeft()} s.`);
       } else {
         this.pinAttempts++;
-        this.rejectPin(`Nieprawidłowy kod PIN. Pozostało prób: ${this.store.attemptsLeft()}.`);
+        this.rejectPin(`Incorrect PIN. Attempts remaining: ${this.store.attemptsLeft()}.`);
       }
     } catch (error) {
-      this.rejectPin('Nie udało się sprawdzić kodu PIN.');
+      this.rejectPin('Could not verify the PIN.');
     } finally {
       this.pinBusy = false;
     }
@@ -559,8 +857,8 @@ struct Index {
     if (pin !== this.pinFirst) {
       this.pinFirst = '';
       this.pinMode = PinMode.CREATE;
-      this.pinMessage = 'Wybierz 4-cyfrowy kod. Będzie potrzebny, aby wyjść z trybu gościa.';
-      this.rejectPin('Kody nie są takie same. Ustaw kod PIN od nowa.');
+      this.pinMessage = 'Choose a 4-digit code. It will be required to exit guest mode.';
+      this.rejectPin('The codes do not match. Set the PIN again.');
       return;
     }
     this.pinBusy = true;
@@ -571,7 +869,7 @@ struct Index {
       this.enterGuest();
     } catch (error) {
       this.pinMode = PinMode.CREATE;
-      this.rejectPin('Nie udało się zapisać kodu PIN.');
+      this.rejectPin('Could not save the PIN.');
     } finally {
       this.pinBusy = false;
     }
@@ -629,7 +927,7 @@ struct Index {
 
   private persistSettings(): void {
     this.store.saveSettings().catch(() => {
-      this.settingsError = 'Nie udało się zapisać ustawień.';
+      this.settingsError = 'Could not save settings.';
     });
   }
 
@@ -638,7 +936,7 @@ struct Index {
     this.settingsSuccess = '';
     if (!isValidPin(this.newPinInput)) {
       hapticAlarm();
-      this.settingsError = 'Nowy kod PIN musi składać się z 4 cyfr!';
+      this.settingsError = 'The new PIN must contain 4 digits!';
       return;
     }
     try {
@@ -647,21 +945,21 @@ struct Index {
         if (result !== PinCheck.OK) {
           hapticAlarm();
           this.settingsError = result === PinCheck.LOCKED ?
-            `Zbyt wiele błędnych prób. Spróbuj ponownie za ${this.store.lockSecondsLeft()} s.` :
-            'Podany stary kod PIN jest nieprawidłowy!';
+            `Too many failed attempts. Try again in ${this.store.lockSecondsLeft()} s.` :
+            'The current PIN is incorrect!';
           return;
         }
       }
       await this.store.setPin(this.newPinInput);
     } catch (error) {
-      this.settingsError = 'Nie udało się zapisać kodu PIN.';
+      this.settingsError = 'Could not save the PIN.';
       return;
     }
     hapticUnlock();
     this.pinConfigured = true;
     this.currentPinInput = '';
     this.newPinInput = '';
-    this.settingsSuccess = 'Kod PIN został pomyślnie zmieniony!';
+    this.settingsSuccess = 'PIN changed successfully!';
     setTimeout(() => {
       this.settingsSuccess = '';
     }, 3500);
@@ -701,60 +999,25 @@ struct Index {
   // ---- Owner screen -----------------------------------------------------------------------
 
   @Builder
-  private headerButton(isTheme: boolean) {
-    Button({ type: ButtonType.Normal }) {
-      SymbolGlyph(isTheme ? (this.darkTheme ? $r('sys.symbol.sun_max') : $r('sys.symbol.moon')) :
-        $r('sys.symbol.gearshape'))
-        .fontSize(20)
-        .fontColor([isTheme && this.darkTheme ? AMBER : this.pal().text])
-    }
-    .width(44)
-    .height(44)
-    .borderRadius(16)
-    .backgroundColor(this.pal().surface)
-    .border({ width: 1, color: this.pal().border })
-    .accessibilityText(isTheme ? (this.darkTheme ? 'Włącz jasny motyw' : 'Włącz ciemny motyw') : 'Ustawienia')
-    .onClick(() => isTheme ? this.setDarkTheme(!this.darkTheme) : this.openSettings())
-  }
-
-  @Builder
   private header() {
     Row() {
-      Row({ space: 12 }) {
-        Image($r('app.media.app_icon_lock'))
-          .width(40)
-          .height(40)
-          .borderRadius(16)
-          .objectFit(ImageFit.Cover)
-          .border({ width: 2, color: this.pal().border })
-        Column({ space: 2 }) {
-          Text('SafeShare')
-            .fontSize(16)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.pal().text)
-          Row({ space: 6 }) {
-            Circle()
-              .width(8)
-              .height(8)
-              .fill(EMERALD)
-            Text('Galeria telefonu')
-              .fontSize(12)
-              .fontColor(this.pal().textMuted)
-          }
-        }
-        .alignItems(HorizontalAlign.Start)
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.gearshape'))
+          .fontSize(20)
+          .fontColor([this.pal().text])
       }
-
-      Blank()
-
-      Row({ space: 8 }) {
-        this.headerButton(true)
-        this.headerButton(false)
-      }
+      .width(40)
+      .height(40)
+      .borderRadius(14)
+      .backgroundColor(this.pal().surface)
+      .border({ width: 1, color: this.pal().border })
+      .accessibilityText('Settings')
+      .onClick(() => this.openSettings())
     }
     .width('100%')
-    .height(64)
-    .padding({ left: 16, right: 16 })
+    .height(48)
+    .padding({ left: 12, right: 12 })
+    .justifyContent(FlexAlign.End)
     .backgroundColor(this.pal().container)
     .border({ width: { bottom: 1 }, color: this.pal().border })
   }
@@ -800,7 +1063,7 @@ struct Index {
   @Builder
   private dateField(isStart: boolean) {
     Column({ space: 4 }) {
-      Text(isStart ? 'Data początkowa (OD)' : 'Data końcowa (DO)')
+      Text(isStart ? 'Start date (FROM)' : 'End date (TO)')
         .fontSize(12)
         .fontColor(this.pal().textMuted)
       Text(formatDay(isStart ? this.customStart : this.customEnd))
@@ -825,7 +1088,7 @@ struct Index {
       SymbolGlyph(visible ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
         .fontSize(14)
         .fontColor([visible ? this.pal().okText : this.pal().warnText])
-      Text(visible ? `${this.allowedCount()} widocznych` : `${this.photos.length - this.allowedCount()} ukrytych`)
+      Text(visible ? `${this.allowedCount()} visible` : `${this.totalCount() - this.allowedCount()} hidden`)
         .fontSize(12)
         .fontWeight(FontWeight.Medium)
         .fontColor(visible ? this.pal().okText : this.pal().warnText)
@@ -842,8 +1105,8 @@ struct Index {
       SymbolGlyph(this.hasManualPicks() ? $r('sys.symbol.hand_tap') : $r('sys.symbol.info_circle'))
         .fontSize(14)
         .fontColor([this.pal().textMuted])
-      Text(this.hasManualPicks() ? `Zmiany ręczne: +${this.manualCount(true)} / −${this.manualCount(false)}` :
-        'Dotknij zdjęcie, aby je pokazać lub ukryć. Przytrzymaj, aby zobaczyć podgląd.')
+      Text(this.hasManualPicks() ? `Manual changes: +${this.manualCount(true)} / −${this.manualCount(false)}` :
+        'Tap a photo to show or hide it. Hold to preview.')
         .fontSize(11)
         .lineHeight(15)
         .fontColor(this.pal().textMuted)
@@ -853,7 +1116,7 @@ struct Index {
           SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
             .fontSize(12)
             .fontColor([this.pal().text])
-          Text('Cofnij zmiany')
+          Text('Undo changes')
             .fontSize(12)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.pal().text)
@@ -869,10 +1132,191 @@ struct Index {
   }
 
   @Builder
+  private assistantBar() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        TextInput({ text: this.assistantText, placeholder: 'Describe a period, e.g. photos from the last 3 days' })
+          .layoutWeight(1)
+          .height(44)
+          .maxLength(MAX_REQUEST_LENGTH)
+          .fontSize(13)
+          .fontColor(this.pal().text)
+          .placeholderColor(this.pal().textMuted)
+          .backgroundColor(this.pal().surface)
+          .border({ width: 1, color: this.pal().border })
+          .borderRadius(12)
+          .enterKeyType(EnterKeyType.Send)
+          .enabled(!this.assistantBusy)
+          .onChange((value: string) => this.editAssistantText(value))
+          .onSubmit(() => this.askAssistant())
+        Button({ type: ButtonType.Normal }) {
+          if (this.assistantBusy) {
+            LoadingProgress()
+              .width(24)
+              .height(24)
+              .color(this.pal().onPrimary)
+          } else {
+            SymbolGlyph($r('sys.symbol.wand_and_stars'))
+              .fontSize(20)
+              .fontColor([this.pal().onPrimary])
+          }
+        }
+        .width(44)
+        .height(44)
+        .borderRadius(12)
+        .backgroundColor(this.pal().primary)
+        .enabled(!this.assistantBusy && this.assistantText.trim().length > 0)
+        .opacity(this.assistantText.trim().length > 0 ? 1 : 0.4)
+        .accessibilityText('Suggest a period from the description')
+        .onClick(() => this.askAssistant())
+      }
+      .width('100%')
+
+      if (this.assistantMessage.length > 0) {
+        Row({ space: 8 }) {
+          SymbolGlyph($r('sys.symbol.info_circle'))
+            .fontSize(14)
+            .fontColor([this.pal().warnText])
+          Text(this.assistantMessage)
+            .fontSize(12)
+            .lineHeight(16)
+            .fontColor(this.pal().warnText)
+            .layoutWeight(1)
+        }
+        .width('100%')
+        .padding(10)
+        .borderRadius(12)
+        .backgroundColor(this.pal().warnBg)
+        .border({ width: 1, color: this.pal().warnBorder })
+      }
+
+      if (this.proposal !== null) {
+        this.proposalCard()
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private proposalCard() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        SymbolGlyph($r('sys.symbol.wand_and_stars'))
+          .fontSize(16)
+          .fontColor([AMBER])
+        Text(`Proposal: ${this.proposalLabel()}`)
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.pal().text)
+          .layoutWeight(1)
+      }
+      .width('100%')
+
+      Text(this.proposalSummary())
+        .width('100%')
+        .fontSize(12)
+        .fontColor(this.pal().textMuted)
+
+      if (this.proposalPhotos().length > 0) {
+        Row({ space: 6 }) {
+          ForEach(this.proposalPhotos().slice(0, PROPOSAL_THUMBS), (photo: GalleryPhoto) => {
+            Stack({ alignContent: Alignment.TopEnd }) {
+              Image(photo.uri)
+                .width(44)
+                .height(44)
+                .borderRadius(8)
+                .objectFit(ImageFit.Cover)
+                .sourceSize({ width: 120, height: 120 })
+                .draggable(false)
+              Button({ type: ButtonType.Circle }) {
+                SymbolGlyph($r('sys.symbol.xmark'))
+                  .fontSize(10)
+                  .fontColor(['#FFFFFF'])
+              }
+              .width(20)
+              .height(20)
+              .backgroundColor(DANGER)
+              .accessibilityText(`Remove ${photo.title} from proposal`)
+              .onClick(() => this.excludeFromProposal(photo.uri))
+            }
+          }, (photo: GalleryPhoto) => photo.uri)
+          if (this.proposalPhotos().length > PROPOSAL_THUMBS) {
+            Text(`+${this.proposalPhotos().length - PROPOSAL_THUMBS}`)
+              .width(44)
+              .height(44)
+              .borderRadius(8)
+              .textAlign(TextAlign.Center)
+              .fontSize(12)
+              .fontColor(this.pal().textMuted)
+              .backgroundColor(this.pal().surfaceHover)
+          }
+        }
+        .width('100%')
+      }
+
+      ForEach(this.proposalDocs('note').concat(this.proposalDocs('pdf')).slice(0, PROPOSAL_THUMBS),
+        (doc: VaultItem) => {
+          Row({ space: 6 }) {
+            SymbolGlyph(doc.kind === 'pdf' ? $r('sys.symbol.doc') : $r('sys.symbol.notepad'))
+              .fontSize(14)
+              .fontColor([this.pal().textMuted])
+            Text(doc.name)
+              .fontSize(12)
+              .fontColor(this.pal().text)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .layoutWeight(1)
+            Button({ type: ButtonType.Circle }) {
+              SymbolGlyph($r('sys.symbol.xmark'))
+                .fontSize(10)
+                .fontColor([this.pal().textMuted])
+            }
+            .width(28)
+            .height(28)
+            .backgroundColor(this.pal().surfaceHover)
+            .accessibilityText(`Remove ${doc.name} from proposal`)
+            .onClick(() => this.excludeFromProposal(doc.path))
+          }
+          .width('100%')
+        }, (doc: VaultItem) => doc.id)
+
+      Text(this.proposalEmpty() ? 'There are no files in this period. The selection changes only after approval.' :
+        'Review the files and remove any you do not want to share. Selection changes only after approval.')
+        .width('100%')
+        .fontSize(11)
+        .fontColor(this.pal().textMuted)
+
+      Row({ space: 8 }) {
+        Button('Reject')
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(13)
+          .fontColor(this.pal().text)
+          .backgroundColor(this.pal().surfaceHover)
+          .onClick(() => this.cancelAssistant())
+        Button('Approve')
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.pal().onPrimary)
+          .backgroundColor(this.pal().primary)
+          .onClick(() => this.approveProposal())
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(12)
+    .borderRadius(16)
+    .backgroundColor(this.pal().surface)
+    .border({ width: 1, color: AMBER })
+  }
+
+  @Builder
   private filterBar() {
     Column({ space: 14 }) {
       Column({ space: 8 }) {
-        Text('OKRES ZDJĘĆ DO POKAZANIA:')
+        Text('PERIOD TO SHOW:')
           .width('100%')
           .fontSize(11)
           .fontWeight(FontWeight.Bold)
@@ -888,13 +1332,15 @@ struct Index {
         }, (row: PresetOption[]) => row[0].key)
       }
 
+      this.assistantBar()
+
       if (this.preset === 'custom') {
         Column({ space: 12 }) {
           Row({ space: 8 }) {
             SymbolGlyph($r('sys.symbol.calendar'))
               .fontSize(16)
               .fontColor(['#0EA5E9'])
-            Text('Wskaż zakres dat (OD - DO):')
+            Text('Select a date range (FROM - TO):')
               .fontSize(12)
               .fontWeight(FontWeight.Medium)
               .fontColor(this.pal().text)
@@ -1033,7 +1479,7 @@ struct Index {
     .border({ width: this.isManual(photo) ? 2 : 1, color: this.isManual(photo) ? AMBER : this.pal().border })
     .opacity(this.isAllowed(photo) ? 1 : 0.4)
     .animation({ duration: 150, curve: Curve.EaseOut })
-    .accessibilityText(this.isAllowed(photo) ? `${photo.title}, widoczne dla gościa` : `${photo.title}, ukryte`)
+    .accessibilityText(this.isAllowed(photo) ? `${photo.title}, visible to guest` : `${photo.title}, hidden`)
     .gesture(
       GestureGroup(GestureMode.Exclusive,
         LongPressGesture()
@@ -1052,21 +1498,21 @@ struct Index {
           .width(40)
           .height(40)
           .color(this.pal().textMuted)
-        Text('Wczytywanie galerii…')
+        Text('Loading gallery…')
           .fontSize(13)
           .fontColor(this.pal().textMuted)
       }
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
     } else if (this.access === Access.DENIED) {
-      this.galleryMessage('Brak dostępu do galerii',
-        'SafeShare potrzebuje zgody na odczyt zdjęć, żeby pokazać je według daty. Zdjęcia nie opuszczają telefonu.',
-        'Zezwól na dostęp', () => this.refreshGallery(true))
+      this.galleryMessage('No gallery access',
+        'SafeShare needs permission to read photos and show them by date. Photos never leave the phone.',
+        'Allow access', () => this.refreshGallery(true))
     } else if (this.access === Access.ERROR) {
-      this.galleryMessage('Nie udało się wczytać galerii', 'Spróbuj ponownie za chwilę.',
-        'Spróbuj ponownie', () => this.refreshGallery(false))
+      this.galleryMessage('Could not load the gallery', 'Try again in a moment.',
+        'Try again', () => this.refreshGallery(false))
     } else if (this.photos.length === 0) {
-      this.galleryMessage('Brak zdjęć w galerii', 'Zrób zdjęcie aparatem albo skopiuj zdjęcia na telefon.', '', () => {})
+      this.galleryMessage('No photos in the gallery', 'Take a photo or copy photos to the phone.', '', () => {})
     } else {
       Grid() {
         ForEach(this.photos, (photo: GalleryPhoto, index: number) => {
@@ -1080,8 +1526,238 @@ struct Index {
       .rowsGap(8)
       .padding({ left: 12, right: 12, top: 12, bottom: 100 })
       .scrollBar(BarState.Off)
+      .nestedScroll({ scrollForward: NestedScrollMode.PARENT_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
       .layoutWeight(1)
     }
+  }
+
+  @Builder
+  private ownerTabs() {
+    Row({ space: 8 }) {
+      ForEach(ALL_KINDS, (kind: ItemKind) => {
+        Row({ space: 6 }) {
+          SymbolGlyph(kind === 'photo' ? $r('sys.symbol.picture') : kind === 'note' ? $r('sys.symbol.notepad') :
+            $r('sys.symbol.doc'))
+            .fontSize(14)
+            .fontColor([this.ownerTab === kind ? this.pal().onPrimary : this.pal().textMuted])
+          Text(`${kindLabel(kind)} ${kind === 'photo' ? this.photos.length : this.docsOf(kind).length}`)
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.ownerTab === kind ? this.pal().onPrimary : this.pal().text)
+        }
+        .layoutWeight(1)
+        .height(36)
+        .justifyContent(FlexAlign.Center)
+        .borderRadius(12)
+        .backgroundColor(this.ownerTab === kind ? this.pal().primary : this.pal().surface)
+        .border({ width: 1, color: this.ownerTab === kind ? this.pal().primary : this.pal().border })
+        .accessibilityText(`${kindLabel(kind)} tab`)
+        .onClick(() => {
+          hapticTap();
+          this.ownerTab = kind;
+        })
+      }, (kind: ItemKind) => kind)
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 10 })
+  }
+
+  @Builder
+  private kindToggle(kind: ItemKind) {
+    Row({ space: 8 }) {
+      Toggle({ type: ToggleType.Switch, isOn: this.shareKinds.includes(kind) })
+        .selectedColor(EMERALD)
+        .onChange((isOn: boolean) => {
+          if (isOn !== this.shareKinds.includes(kind)) {
+            this.toggleKind(kind);
+          }
+        })
+      Text(kind === 'photo' ? 'Share photos' : kind === 'note' ? 'Share notes' : 'Share PDFs')
+        .fontSize(13)
+        .fontColor(this.pal().text)
+        .layoutWeight(1)
+      if (kind !== 'photo') {
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 6 }) {
+            if (this.importBusy) {
+              LoadingProgress()
+                .width(16)
+                .height(16)
+                .color(this.pal().text)
+            } else {
+              SymbolGlyph($r('sys.symbol.folder_badge_plus'))
+                .fontSize(16)
+                .fontColor([this.pal().text])
+            }
+            Text('Import')
+              .fontSize(12)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.pal().text)
+          }
+        }
+        .height(32)
+        .padding({ left: 12, right: 12 })
+        .borderRadius(10)
+        .backgroundColor(this.pal().surface)
+        .border({ width: 1, color: this.pal().border })
+        .enabled(!this.importBusy)
+        .onClick(() => this.importKind(kind))
+      }
+    }
+    .width('100%')
+    .padding({ left: 16, right: 12, top: 8 })
+  }
+
+  @Builder
+  private docRow(doc: VaultItem) {
+    Row({ space: 12 }) {
+      Column() {
+        SymbolGlyph(doc.kind === 'pdf' ? $r('sys.symbol.doc') : $r('sys.symbol.notepad'))
+          .fontSize(20)
+          .fontColor([doc.kind === 'pdf' ? '#F87171' : '#60A5FA'])
+      }
+      .width(40)
+      .height(40)
+      .borderRadius(10)
+      .justifyContent(FlexAlign.Center)
+      .backgroundColor(this.pal().surfaceHover)
+
+      Column({ space: 2 }) {
+        Text(doc.name)
+          .width('100%')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.pal().text)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(`${formatDateTime(doc.createdAt)} · ${formatSize(doc.size)}`)
+          .width('100%')
+          .fontSize(11)
+          .fontColor(this.pal().textMuted)
+          .maxLines(1)
+      }
+      .layoutWeight(1)
+
+      SymbolGlyph(this.isDocAllowed(doc) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
+        .fontSize(18)
+        .fontColor([this.isDocAllowed(doc) ? EMERALD : this.pal().textMuted])
+    }
+    .width('100%')
+    .padding(10)
+    .borderRadius(12)
+    .backgroundColor(this.pal().surface)
+    .border({ width: this.isDocManual(doc) ? 2 : 1, color: this.isDocManual(doc) ? AMBER : this.pal().border })
+    .opacity(this.isDocAllowed(doc) ? 1 : 0.5)
+    .accessibilityText(this.isDocAllowed(doc) ? `${doc.name}, visible to guest` : `${doc.name}, hidden`)
+    .gesture(
+      GestureGroup(GestureMode.Exclusive,
+        LongPressGesture()
+          .onAction(() => this.openDocPreview(doc)),
+        TapGesture()
+          .onAction(() => this.toggleDoc(doc))
+      )
+    )
+  }
+
+  @Builder
+  private documentsBody(kind: ItemKind) {
+    Column({ space: 8 }) {
+      this.kindToggle(kind)
+      if (this.importMessage.length > 0) {
+        Text(this.importMessage)
+          .width('100%')
+          .padding({ left: 16, right: 16 })
+          .fontSize(12)
+          .fontColor(this.pal().textMuted)
+      }
+      if (this.docsOf(kind).length === 0) {
+        this.galleryMessage(kind === 'note' ? 'No notes' : 'No PDF files',
+          kind === 'note' ? 'Import notes from .txt or .md files. Copies will be stored in the app vault.' :
+            'Import PDF files. Copies will be stored in the app vault.',
+          'Import', () => this.importKind(kind))
+      } else {
+        List({ space: 8 }) {
+          ForEach(this.docsOf(kind), (doc: VaultItem) => {
+            ListItem() {
+              this.docRow(doc)
+            }
+          }, (doc: VaultItem) => doc.id)
+        }
+        .layoutWeight(1)
+        .padding({ left: 12, right: 12, bottom: 100 })
+        .scrollBar(BarState.Off)
+        .nestedScroll({ scrollForward: NestedScrollMode.PARENT_FIRST, scrollBackward: NestedScrollMode.SELF_FIRST })
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
+  }
+
+  @Builder
+  private docPreviewOverlay(doc: VaultItem) {
+    Column() {
+      Row({ space: 8 }) {
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(18)
+            .fontColor([this.pal().text])
+        }
+        .width(40)
+        .height(40)
+        .backgroundColor(this.pal().surface)
+        .accessibilityText('Close preview')
+        .onClick(() => this.docPreview = null)
+        Text(doc.name)
+          .fontSize(15)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.pal().text)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+      }
+      .width('100%')
+      .padding(12)
+
+      if (doc.kind === 'pdf') {
+        PdfView({ path: doc.path })
+          .layoutWeight(1)
+      } else {
+        Scroll() {
+          Text(this.docPreviewText)
+            .width('100%')
+            .fontSize(14)
+            .lineHeight(21)
+            .fontColor(this.pal().text)
+        }
+        .layoutWeight(1)
+        .padding(16)
+        .align(Alignment.TopStart)
+      }
+
+      Row({ space: 8 }) {
+        Button(this.confirmDelete ? 'Delete permanently?' : 'Delete from vault')
+          .layoutWeight(1)
+          .height(44)
+          .fontSize(13)
+          .fontColor('#FFFFFF')
+          .backgroundColor(DANGER)
+          .onClick(() => this.deleteDoc(doc))
+        Button(this.isDocAllowed(doc) ? 'Hide from guest' : 'Show to guest')
+          .layoutWeight(1)
+          .height(44)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.pal().onPrimary)
+          .backgroundColor(this.pal().primary)
+          .enabled(this.shareKinds.includes(doc.kind))
+          .onClick(() => this.toggleDoc(doc))
+      }
+      .width('100%')
+      .padding(12)
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.pal().page)
   }
 
   @Builder
@@ -1100,7 +1776,7 @@ struct Index {
           .justifyContent(FlexAlign.Center)
           .backgroundColor('#33FBBF24')
 
-          Text(`Zablokuj i przekaż telefon (${this.allowedCount()})`)
+          Text(`Lock and hand over phone (${this.allowedCount()})`)
             .fontSize(14)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.pal().onPrimary)
@@ -1128,19 +1804,42 @@ struct Index {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
         this.header()
-        this.filterBar()
-        if (this.storeError) {
+        // The period controls scroll away first, then the grid or list scrolls (nestedScroll).
+        Scroll() {
           Column() {
-            this.notice('Pamięć aplikacji jest niedostępna. Tryb gościa jest zablokowany.')
+            this.filterBar()
+            if (this.storeError) {
+              Column() {
+                this.notice('App storage is unavailable. Guest mode is blocked.')
+              }
+              .padding({ left: 16, right: 16, top: 12 })
+            } else if (!this.privacyReady) {
+              Column() {
+                this.notice('Could not enable screenshot protection. Guest mode is blocked.')
+              }
+              .padding({ left: 16, right: 16, top: 12 })
+            }
+            this.ownerTabs()
+            Column() {
+              // One branch per kind: @Builder arguments are copied, so a shared branch would not
+              // re-render when the tab changes between notes and PDFs.
+              if (this.ownerTab === 'photo') {
+                this.kindToggle('photo')
+                this.galleryBody()
+              } else if (this.ownerTab === 'note') {
+                this.documentsBody('note')
+              } else {
+                this.documentsBody('pdf')
+              }
+            }
+            .width('100%')
+            .height(this.ownerViewport)
           }
-          .padding({ left: 16, right: 16, top: 12 })
-        } else if (!this.privacyReady) {
-          Column() {
-            this.notice('Nie udało się włączyć ochrony okna przed zrzutami ekranu. Tryb gościa jest zablokowany.')
-          }
-          .padding({ left: 16, right: 16, top: 12 })
         }
-        this.galleryBody()
+        .layoutWeight(1)
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.None)
+        .onAreaChange((oldArea: Area, newArea: Area) => this.ownerViewport = Number(newArea.height))
       }
       .width('100%')
       .height('100%')
@@ -1186,8 +1885,8 @@ struct Index {
               SymbolGlyph(this.isAllowed(photo) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
                 .fontSize(12)
                 .fontColor([this.isAllowed(photo) ? '#FFFFFF' : AMBER])
-              Text((this.isAllowed(photo) ? 'Dostępne dla gościa' : 'Zablokowane') +
-                (this.isManual(photo) ? ' · ręcznie' : ''))
+              Text((this.isAllowed(photo) ? 'Available to guest' : 'Locked') +
+                (this.isManual(photo) ? ' · manual' : ''))
                 .fontSize(10)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.isAllowed(photo) ? '#FFFFFF' : '#D4D4D8')
@@ -1206,7 +1905,7 @@ struct Index {
             .width(32)
             .height(32)
             .backgroundColor('#99000000')
-            .accessibilityText('Zamknij')
+            .accessibilityText('Close')
             .onClick(() => this.detailIndex = -1)
           }
           .width('100%')
@@ -1236,7 +1935,7 @@ struct Index {
             SymbolGlyph($r('sys.symbol.camera'))
               .fontSize(14)
               .fontColor([this.pal().textMuted])
-            Text(this.detailCamera.length > 0 ? this.detailCamera : 'Brak danych o aparacie')
+            Text(this.detailCamera.length > 0 ? this.detailCamera : 'No camera data')
               .fontSize(12)
               .fontColor(this.pal().textMuted)
               .layoutWeight(1)
@@ -1251,7 +1950,7 @@ struct Index {
                 SymbolGlyph(this.isAllowed(photo) ? $r('sys.symbol.eye_slash') : $r('sys.symbol.eye'))
                   .fontSize(14)
                   .fontColor([this.isAllowed(photo) ? this.pal().text : this.pal().onPrimary])
-                Text(this.isAllowed(photo) ? 'Ukryj przed gościem' : 'Pokaż gościowi')
+                Text(this.isAllowed(photo) ? 'Hide from guest' : 'Show to guest')
                   .fontSize(12)
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.isAllowed(photo) ? this.pal().text : this.pal().onPrimary)
@@ -1266,7 +1965,7 @@ struct Index {
 
             Blank()
 
-            Button('Zamknij')
+            Button('Close')
               .height(32)
               .padding({ left: 16, right: 16 })
               .fontSize(12)
@@ -1322,17 +2021,17 @@ struct Index {
       .backgroundColor(dark ? '#660C4A6E' : '#FEF3C7')
 
       Column({ space: 2 }) {
-        Text(dark ? 'Ciemny motyw' : 'Jasny motyw')
+        Text(dark ? 'Dark theme' : 'Light theme')
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().text)
-        Text(dark ? 'Czerń OLED' : 'Czysta biel')
+        Text(dark ? 'OLED black' : 'Pure white')
           .fontSize(11)
           .fontColor(this.pal().textMuted)
       }
 
       if (this.darkTheme === dark) {
-        Text('Aktywny')
+        Text('Active')
           .fontSize(10)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().okText)
@@ -1352,11 +2051,11 @@ struct Index {
   @Builder
   private pinField(isCurrent: boolean) {
     Column({ space: 4 }) {
-      Text(isCurrent ? 'Obecny PIN:' : 'Nowy PIN:')
+      Text(isCurrent ? 'Current PIN:' : 'New PIN:')
         .fontSize(11)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.pal().textMuted)
-      TextInput({ text: isCurrent ? this.currentPinInput : this.newPinInput, placeholder: '4 cyfry' })
+      TextInput({ text: isCurrent ? this.currentPinInput : this.newPinInput, placeholder: '4 digits' })
         .type(InputType.NUMBER_PASSWORD)
         .maxLength(PIN_LENGTH)
         .showPasswordIcon(false)
@@ -1385,14 +2084,14 @@ struct Index {
   private settingToggle(isLeaveAlarm: boolean) {
     Row({ space: 12 }) {
       Column({ space: 2 }) {
-        Text(isLeaveAlarm ? 'Alarm przy próbie wyjścia z aplikacji' : 'Ukryj szczegóły zdjęcia')
+        Text(isLeaveAlarm ? 'Alert on app exit attempt' : 'Hide photo details')
           .width('100%')
           .fontSize(14)
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().text)
         Text(isLeaveAlarm ?
-          'Blokuje ekran kodem PIN natychmiast, gdy gość wróci do ekranu głównego, przełączy aplikację lub ją zminimalizuje.' :
-          'Gość oglądający zdjęcia nie zobaczy modelu aparatu ani rozdzielczości.')
+          'Locks the screen with the PIN immediately when the guest returns to the home screen, switches apps or minimizes it.' :
+          'A guest viewing photos will not see the camera model or resolution.')
           .width('100%')
           .fontSize(12)
           .lineHeight(17)
@@ -1416,11 +2115,11 @@ struct Index {
     Column() {
       Row() {
         Column({ space: 2 }) {
-          Text('Ustawienia aplikacji')
+          Text('App settings')
             .fontSize(18)
             .fontWeight(FontWeight.Bold)
             .fontColor(this.pal().text)
-          Text('Personalizacja wyglądu i ochrona PIN')
+          Text('Appearance and PIN protection')
             .fontSize(12)
             .fontColor(this.pal().textMuted)
         }
@@ -1436,7 +2135,7 @@ struct Index {
         .width(40)
         .height(40)
         .backgroundColor(Color.Transparent)
-        .accessibilityText('Zamknij')
+        .accessibilityText('Close')
         .onClick(() => this.settingsOpen = false)
       }
       .width('100%')
@@ -1446,7 +2145,7 @@ struct Index {
       Scroll() {
         Column({ space: 24 }) {
           Column({ space: 12 }) {
-            this.sectionLabel('1. WYBIERZ MOTYW KOLORYSTYCZNY')
+            this.sectionLabel('1. SELECT COLOR THEME')
             Row({ space: 12 }) {
               this.themeCard(false)
               this.themeCard(true)
@@ -1460,7 +2159,7 @@ struct Index {
                 SymbolGlyph($r('sys.symbol.key'))
                   .fontSize(16)
                   .fontColor([AMBER])
-                Text('2. Kod PIN do odblokowania')
+                Text('2. Unlock PIN')
                   .fontSize(14)
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.pal().text)
@@ -1468,7 +2167,7 @@ struct Index {
 
               Blank()
 
-              Text(this.pinConfigured ? 'Ustawiony' : 'Nieustawiony')
+              Text(this.pinConfigured ? 'Set' : 'Not set')
                 .fontSize(11)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.pinConfigured ? this.pal().okText : this.pal().warnText)
@@ -1479,8 +2178,8 @@ struct Index {
             .width('100%')
 
             Text(this.pinConfigured ?
-              'Ten 4-cyfrowy kod jest wymagany do opuszczenia trybu gościa i powrotu do pełnej galerii.' :
-              'Ustaw 4-cyfrowy kod. Będzie wymagany do opuszczenia trybu gościa.')
+              'This 4-digit code is required to exit guest mode and return to the full gallery.' :
+              'Set a 4-digit code. It will be required to exit guest mode.')
               .width('100%')
               .fontSize(12)
               .lineHeight(17)
@@ -1513,7 +2212,7 @@ struct Index {
                 .borderRadius(12)
             }
 
-            Button('Zapisz nowy kod PIN')
+            Button('Save new PIN')
               .width('100%')
               .height(48)
               .borderRadius(12)
@@ -1529,7 +2228,7 @@ struct Index {
           .border({ width: 1, color: this.pal().border })
 
           Column({ space: 12 }) {
-            this.sectionLabel('3. ZABEZPIECZENIA W TRYBIE GOŚCIA')
+            this.sectionLabel('3. GUEST MODE PROTECTION')
             this.settingToggle(true)
             this.settingToggle(false)
           }
@@ -1540,7 +2239,7 @@ struct Index {
                 SymbolGlyph($r('sys.symbol.exclamationmark_triangle'))
                   .fontSize(18)
                   .fontColor([AMBER])
-                Text('Ograniczenia systemu OpenHarmony')
+                Text('OpenHarmony system limitations')
                   .fontSize(14)
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.pal().warnText)
@@ -1561,11 +2260,10 @@ struct Index {
             .onClick(() => this.guideOpen = !this.guideOpen)
 
             if (this.guideOpen) {
-              Text('SafeShare nie może zablokować przycisków systemowych. Gość może wrócić do ekranu głównego i otworzyć ' +
-                'inną aplikację, np. systemową Galerię. SafeShare wtedy natychmiast zablokuje się kodem PIN, ale nie ' +
-                'zablokuje innych aplikacji.\n\nPrzed przekazaniem telefonu ustaw systemową blokadę ekranu. Pełna blokada ' +
-                'w jednej aplikacji (tryb kiosku) wymaga urządzenia zarządzanego przez administratora (Enterprise Device ' +
-                'Management).')
+              Text('SafeShare cannot block system buttons. A guest can return to the home screen and open another app, ' +
+                'such as the system Gallery. SafeShare will immediately lock itself with the PIN, but it cannot lock other ' +
+                'apps.\n\nBefore handing over the phone, enable the system screen lock. Full confinement to one app ' +
+                '(kiosk mode) requires an administrator-managed device (Enterprise Device Management).')
                 .width('100%')
                 .padding(16)
                 .fontSize(12)
@@ -1583,7 +2281,7 @@ struct Index {
       .scrollBar(BarState.Off)
       .align(Alignment.Top)
 
-      Button('Gotowe')
+      Button('Done')
         .width('100%')
         .height(56)
         .borderRadius(16)
@@ -1628,7 +2326,7 @@ struct Index {
     .borderRadius(16)
     .backgroundColor('#CC18181B')
     .border({ width: 1, color: '#993F3F46' })
-    .accessibilityText(isZoom ? 'Przybliż / oddal zdjęcie' : 'Informacje o zdjęciu')
+    .accessibilityText(isZoom ? 'Zoom photo in or out' : 'Photo information')
     .onClick(() => {
       if (isZoom) {
         this.toggleZoom();
@@ -1640,48 +2338,58 @@ struct Index {
 
   @Builder
   private guestTopBar() {
-    Row() {
-      Row({ space: 6 }) {
-        SymbolGlyph($r('sys.symbol.lock_fill'))
-          .fontSize(14)
-          .fontColor([AMBER])
-        Text(`Tryb Gościa: ${this.guestIndex + 1} / ${this.guestPhotos.length}`)
-          .fontSize(12)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#FCD34D')
-      }
-      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
-      .borderRadius(999)
-      .backgroundColor('#33F59E0B')
-      .border({ width: 1, color: '#66F59E0B' })
-
-      Blank()
-
-      Row({ space: 8 }) {
-        this.guestIconButton(true)
-        if (this.showDetails) {
-          this.guestIconButton(false)
+    Column({ space: 10 }) {
+      Row() {
+        Row({ space: 6 }) {
+          SymbolGlyph($r('sys.symbol.lock_fill'))
+            .fontSize(14)
+            .fontColor([AMBER])
+          Text(this.guestTab === 'photo' ? `Guest Mode: ${this.guestIndex + 1} / ${this.guestPhotos.length}` :
+            `Guest Mode: ${kindLabel(this.guestTab)}`)
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FCD34D')
         }
-        Button({ type: ButtonType.Normal }) {
-          Row({ space: 8 }) {
-            SymbolGlyph($r('sys.symbol.lock_fill'))
-              .fontSize(16)
-              .fontColor([AMBER])
-            Text('Wyjdź (PIN)')
-              .fontSize(12)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
+        .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+        .borderRadius(999)
+        .backgroundColor('#33F59E0B')
+        .border({ width: 1, color: '#66F59E0B' })
+
+        Blank()
+
+        Row({ space: 8 }) {
+          if (this.guestTab === 'photo') {
+            this.guestIconButton(true)
+            if (this.showDetails) {
+              this.guestIconButton(false)
+            }
           }
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 8 }) {
+              SymbolGlyph($r('sys.symbol.lock_fill'))
+                .fontSize(16)
+                .fontColor([AMBER])
+              Text('Exit (PIN)')
+                .fontSize(12)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFFFF')
+            }
+          }
+          .height(44)
+          .padding({ left: 16, right: 16 })
+          .borderRadius(16)
+          .backgroundColor('#E618181B')
+          .border({ width: 1, color: '#3F3F46' })
+          .onClick(() => {
+            hapticTap();
+            this.openPin(PinMode.EXIT, '');
+          })
         }
-        .height(44)
-        .padding({ left: 16, right: 16 })
-        .borderRadius(16)
-        .backgroundColor('#E618181B')
-        .border({ width: 1, color: '#3F3F46' })
-        .onClick(() => {
-          hapticTap();
-          this.openPin(PinMode.EXIT, '');
-        })
+      }
+      .width('100%')
+
+      if (this.guestKinds().length > 1) {
+        this.guestTabs()
       }
     }
     .width('100%')
@@ -1690,6 +2398,138 @@ struct Index {
       direction: GradientDirection.Bottom,
       colors: [['#E6000000', 0], ['#80000000', 0.5], ['#00000000', 1]]
     })
+  }
+
+  @Builder
+  private guestTabs() {
+    Row({ space: 8 }) {
+      ForEach(this.guestKinds(), (kind: ItemKind) => {
+        Text(`${kindLabel(kind)} ${kind === 'photo' ? this.guestPhotos.length :
+          this.guestDocs.filter((doc: VaultItem) => doc.kind === kind).length}`)
+          .height(32)
+          .padding({ left: 14, right: 14 })
+          .borderRadius(999)
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.guestTab === kind ? '#020617' : '#E4E4E7')
+          .backgroundColor(this.guestTab === kind ? AMBER : '#CC18181B')
+          .border({ width: 1, color: this.guestTab === kind ? AMBER : '#3F3F46' })
+          .onClick(() => this.showGuestTab(kind))
+      }, (kind: ItemKind) => kind)
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private guestDocRow(doc: VaultItem) {
+    Row({ space: 12 }) {
+      SymbolGlyph(doc.kind === 'pdf' ? $r('sys.symbol.doc') : $r('sys.symbol.notepad'))
+        .fontSize(20)
+        .fontColor([doc.kind === 'pdf' ? '#F87171' : '#60A5FA'])
+      Column({ space: 2 }) {
+        Text(doc.name)
+          .width('100%')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        Text(formatDateTime(doc.createdAt))
+          .width('100%')
+          .fontSize(11)
+          .fontFamily('monospace')
+          .fontColor('#94A3B8')
+      }
+      .layoutWeight(1)
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor(['#71717A'])
+    }
+    .width('100%')
+    .padding(14)
+    .borderRadius(12)
+    .backgroundColor('#18181B')
+    .border({ width: 1, color: '#27272A' })
+    .onClick(() => this.openGuestDoc(doc))
+  }
+
+  @Builder
+  private guestDocsScreen() {
+    Column() {
+      this.guestTopBar()
+      if (this.guestDoc === null) {
+        Scroll() {
+          Column({ space: 8 }) {
+            ForEach(this.guestDocs.filter((doc: VaultItem) => doc.kind === this.guestTab), (doc: VaultItem) => {
+              this.guestDocRow(doc)
+            }, (doc: VaultItem) => doc.id)
+            if (this.lockedDocs > 0) {
+              Row({ space: 8 }) {
+                SymbolGlyph($r('sys.symbol.lock_fill'))
+                  .fontSize(14)
+                  .fontColor([AMBER])
+                Text(`Remaining files (${this.lockedDocs}) are locked.`)
+                  .fontSize(12)
+                  .fontColor('#FDE68A')
+              }
+              .width('100%')
+              .padding(12)
+            }
+          }
+          .padding({ left: 16, right: 16, bottom: 24 })
+        }
+        .layoutWeight(1)
+        .align(Alignment.Top)
+        .scrollBar(BarState.Off)
+      } else {
+        Row({ space: 8 }) {
+          Button({ type: ButtonType.Normal }) {
+            Row({ space: 4 }) {
+              SymbolGlyph($r('sys.symbol.chevron_left'))
+                .fontSize(16)
+                .fontColor(['#FFFFFF'])
+              Text('List')
+                .fontSize(13)
+                .fontColor('#FFFFFF')
+            }
+          }
+          .height(36)
+          .padding({ left: 10, right: 14 })
+          .borderRadius(10)
+          .backgroundColor('#27272A')
+          .onClick(() => this.guestDoc = null)
+          Text(this.guestDoc.name)
+            .fontSize(14)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#FFFFFF')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .layoutWeight(1)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 8 })
+
+        if (this.guestDoc.kind === 'pdf') {
+          PdfView({ path: this.guestDoc.path })
+            .layoutWeight(1)
+        } else {
+          Scroll() {
+            Text(this.guestNote)
+              .width('100%')
+              .fontSize(15)
+              .lineHeight(23)
+              .fontColor('#E4E4E7')
+              .privacySensitive(true)
+          }
+          .layoutWeight(1)
+          .padding(16)
+          .align(Alignment.TopStart)
+        }
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#000000')
   }
 
   @Builder
@@ -1733,7 +2573,7 @@ struct Index {
         }
         .layoutWeight(1)
 
-        Text(`Okres: ${this.guestRangeLabel}`)
+        Text(`Period: ${this.guestRangeLabel}`)
           .fontSize(11)
           .fontWeight(FontWeight.Medium)
           .fontColor(EMERALD)
@@ -1767,10 +2607,10 @@ struct Index {
             .justifyContent(FlexAlign.Center)
             .backgroundColor('#E60F172A')
             .border({ width: 1, color: '#66F59E0B', style: BorderStyle.Dashed })
-            .accessibilityText('Pozostałe zdjęcia w galerii są zablokowane')
+            .accessibilityText('The remaining gallery photos are locked')
             .onClick(() => {
               hapticAlarm();
-              this.showBoundary(`${this.lockedCount} pozostałych prywatnych zdjęć jest zablokowane.`);
+              this.showBoundary(`${this.lockedCount} remaining private photos are locked.`);
             })
           }
           .padding({ top: 4, bottom: 4, left: 2, right: 2 })
@@ -1794,7 +2634,7 @@ struct Index {
     Column() {
       Column({ space: 10 }) {
         Row() {
-          Text('Metadane zdjęcia')
+          Text('Photo metadata')
             .fontSize(14)
             .fontWeight(FontWeight.Medium)
             .fontColor('#FFFFFF')
@@ -1835,7 +2675,7 @@ struct Index {
           SymbolGlyph($r('sys.symbol.camera'))
             .fontSize(16)
             .fontColor([EMERALD])
-          Text(this.guestCamera.length > 0 ? this.guestCamera : 'Brak danych o aparacie')
+          Text(this.guestCamera.length > 0 ? this.guestCamera : 'No camera data')
             .fontSize(12)
             .fontColor('#E2E8F0')
         }
@@ -1870,16 +2710,16 @@ struct Index {
       .backgroundColor('#1AF59E0B')
       .border({ width: 1, color: '#4DF59E0B' })
 
-      Text('Galeria jest zablokowana')
+      Text('Gallery locked')
         .fontSize(20)
         .fontWeight(FontWeight.Bold)
         .fontColor('#FFFFFF')
-      Text('Sesja gościa została przerwana. Pozostałe zdjęcia są ukryte do czasu podania kodu PIN właściciela.')
+      Text('The guest session was interrupted. The remaining photos are hidden until the owner PIN is entered.')
         .fontSize(14)
         .lineHeight(20)
         .textAlign(TextAlign.Center)
         .fontColor('#94A3B8')
-      Button('Odblokuj galerię (kod PIN)')
+      Button('Unlock gallery (PIN)')
         .height(40)
         .padding({ left: 24, right: 24 })
         .margin({ top: 12 })
@@ -1888,7 +2728,7 @@ struct Index {
         .fontColor('#020617')
         .backgroundColor(AMBER)
         .onClick(() => this.openPin(PinMode.RESUME,
-          'Sesja gościa została przerwana. Wprowadź kod PIN właściciela, aby wrócić do galerii.'))
+          'The guest session was interrupted. Enter the owner PIN to return to the gallery.'))
     }
     .width('100%')
     .height('100%')
@@ -1899,8 +2739,10 @@ struct Index {
 
   @Builder
   private guestScreen() {
-    if (this.guestPhotos.length === 0) {
+    if (this.guestPhotos.length === 0 && this.guestDocs.length === 0) {
       this.guestLocked()
+    } else if (this.guestTab !== 'photo') {
+      this.guestDocsScreen()
     } else {
       Stack() {
         Stack() {
@@ -2051,18 +2893,18 @@ struct Index {
               .width(72)
               .height(72)
               .backgroundColor(Color.Transparent)
-              .accessibilityText('Usuń cyfrę')
+              .accessibilityText('Delete digit')
               .onClick(() => this.deleteDigit())
             }
           }
 
-          Text('Zapomniałeś kodu PIN?')
+          Text('Forgot your PIN?')
             .fontSize(11)
             .fontColor(this.pal().textMuted)
             .margin({ top: 16 })
             .onClick(() => this.pinHintOpen = !this.pinHintOpen)
           if (this.pinHintOpen) {
-            Text('Kodu nie da się odzyskać. Aby go zresetować, wyczyść dane aplikacji SafeShare w Ustawieniach systemu.')
+            Text('The PIN cannot be recovered. To reset it, clear SafeShare app data in System Settings.')
               .margin({ top: 6 })
               .padding(8)
               .fontSize(11)
@@ -2073,7 +2915,7 @@ struct Index {
               .borderRadius(8)
           }
           if (this.pinAttempts > 0) {
-            Text(`Błędnych prób: ${this.pinAttempts}`)
+            Text(`Failed attempts: ${this.pinAttempts}`)
               .margin({ top: 4 })
               .fontSize(10)
               .fontFamily('monospace')
@@ -2092,7 +2934,7 @@ struct Index {
           .width(40)
           .height(40)
           .backgroundColor(Color.Transparent)
-          .accessibilityText('Anuluj')
+          .accessibilityText('Cancel')
           .onClick(() => this.closePin())
         }
       }
@@ -2119,6 +2961,9 @@ struct Index {
       }
       if (!this.guestMode && this.detailIndex >= 0 && this.detailIndex < this.photos.length) {
         this.detailOverlay(this.photos[this.detailIndex])
+      }
+      if (!this.guestMode && this.docPreview !== null) {
+        this.docPreviewOverlay(this.docPreview)
       }
       if (!this.guestMode && this.settingsOpen) {
         this.settingsOverlay()

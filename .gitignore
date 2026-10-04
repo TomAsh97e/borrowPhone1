@@ -13,3 +13,7 @@ signatures/
 *.p7b
 *.csr
 *.jks
+.cxx/
+**/.cxx/
+entry/src/main/resources/rawfile/models/
+models/

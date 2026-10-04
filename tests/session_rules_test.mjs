@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  clampIndex, constantTimeEqual, dayRange, isInRange, isShared, isValidPin, normalizeTimestamp, presetRange,
+  clampIndex, constantTimeEqual, dayRange, hidePick, isInRange, isShared, isValidPin, normalizeTimestamp, presetRange,
   togglePick
 } from '../entry/src/main/ets/model/SessionRules.ts';
 
@@ -47,4 +47,6 @@ assert.equal(isShared('b', false, picked), true);
 const repicked = togglePick('b', true, picked);
 assert.deepEqual(repicked, { added: [], removed: ['b'] });
 assert.equal(isShared('b', false, repicked), false);
+assert.deepEqual(hidePick('b', false, picked), none);
+assert.deepEqual(hidePick('a', true, picked), { added: ['b'], removed: ['a'] });
 console.log('SessionRules checks passed.');

@@ -19,6 +19,22 @@ export interface Palette {
   errorBg: string;
   errorText: string;
   statusBarContent: string;
+  // Translucent layers, drawn over blurred content behind them.
+  glass: string;
+  surfaceGlass: string;
+  sheet: string;
+  scrim: string;
+  fadeFrom: string;
+  fadeTo: string;
+  warnGlass: string;
+  // Guest viewer: tint over the blurred photo backdrop, fades behind the controls and the controls.
+  viewerScrim: string;
+  viewerFade: string;
+  viewerFadeClear: string;
+  viewerGlass: string;
+  viewerBorder: string;
+  viewerText: string;
+  viewerMuted: string;
 }
 
 export const DARK: Palette = {
@@ -40,7 +56,21 @@ export const DARK: Palette = {
   warnText: '#FCD34D',
   errorBg: '#3B0A0A',
   errorText: '#FCA5A5',
-  statusBarContent: '#FFFFFF'
+  statusBarContent: '#FFFFFF',
+  glass: '#BF09090B',
+  surfaceGlass: '#B318181B',
+  sheet: '#E618181B',
+  scrim: '#8C000000',
+  fadeFrom: '#0009090B',
+  fadeTo: '#F209090B',
+  warnGlass: '#D9451A03',
+  viewerScrim: '#9909090B',
+  viewerFade: '#99000000',
+  viewerFadeClear: '#00000000',
+  viewerGlass: '#8018181B',
+  viewerBorder: '#26FFFFFF',
+  viewerText: '#FFFFFF',
+  viewerMuted: '#A1A1AA'
 };
 
 export const LIGHT: Palette = {
@@ -62,7 +92,21 @@ export const LIGHT: Palette = {
   warnText: '#B45309',
   errorBg: '#FEE2E2',
   errorText: '#B91C1C',
-  statusBarContent: '#000000'
+  statusBarContent: '#000000',
+  glass: '#BFFFFFFF',
+  surfaceGlass: '#B3F4F4F5',
+  sheet: '#EBFFFFFF',
+  scrim: '#5918181B',
+  fadeFrom: '#00FFFFFF',
+  fadeTo: '#F2FFFFFF',
+  warnGlass: '#E6FFFBEB',
+  viewerScrim: '#A6FAFAFA',
+  viewerFade: '#B3FFFFFF',
+  viewerFadeClear: '#00FFFFFF',
+  viewerGlass: '#99FFFFFF',
+  viewerBorder: '#1A000000',
+  viewerText: '#18181B',
+  viewerMuted: '#52525B'
 };
 
 export const AMBER = '#FBBF24';

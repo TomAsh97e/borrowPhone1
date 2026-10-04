@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { display, window } from '@kit.ArkUI';
 import { formatDateTime, formatDay, formatRangeShort } from '../common/Format';
+import { gridColumns, pinScale, presetColumns, uiScale } from '../common/Layout';
 import { AMBER, DANGER, DARK, EMERALD, LIGHT, Palette } from '../common/Theme';
 import {
   dayRange, isInRange, isValidPin, PIN_LENGTH, PresetKey, presetRange, startOfDay, TimeRange
@@ -12,6 +13,11 @@ import { hapticAlarm, hapticLock, hapticTap, hapticUnlock } from '../service/Hap
 const BOUNDARY_ALERT_MS = 3000;
 const SWIPE_DISTANCE = 40;
 const ZOOM_SCALE = 1.5;
+// Blur radius (px) behind translucent bars, sheets and dialogs, and of the guest photo backdrop.
+const GLASS_BLUR = 40;
+const AMBIENT_BLUR = 30;
+const FADE_MS = 220;
+const SCREEN_FADE_MS = 380;
 
 enum Access {
   LOADING,
@@ -45,11 +51,11 @@ class PresetOption {
   }
 }
 
-const PRESET_ROWS: PresetOption[][] = [
-  [new PresetOption('today', 'Dzisiaj', $r('sys.symbol.calendar'), '#EF4444', 'Bieżący dzień'),
-    new PresetOption('yesterday', 'Wczoraj', $r('sys.symbol.clock'), '#60A5FA', 'Poprzedni dzień')],
-  [new PresetOption('weekend', 'Weekend', $r('sys.symbol.sunset_fill'), '#F97316', 'Ostatni weekend'),
-    new PresetOption('custom', 'Własny zakres', $r('sys.symbol.slider_horizontal_2'), '#A1A1AA', 'Wybierz daty')]
+const PRESETS: PresetOption[] = [
+  new PresetOption('today', 'Dzisiaj', $r('sys.symbol.calendar'), '#EF4444', 'Bieżący dzień'),
+  new PresetOption('yesterday', 'Wczoraj', $r('sys.symbol.clock'), '#60A5FA', 'Poprzedni dzień'),
+  new PresetOption('weekend', 'Weekend', $r('sys.symbol.sunset_fill'), '#F97316', 'Ostatni weekend'),
+  new PresetOption('custom', 'Własny zakres', $r('sys.symbol.slider_horizontal_2'), '#A1A1AA', 'Wybierz daty')
 ];
 
 const KEYPAD_ROWS: string[][] = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9']];
@@ -60,6 +66,12 @@ const PIN_SLOTS: number[] = [0, 1, 2, 3];
 struct Index {
   @StorageLink('privacyReady') private privacyReady: boolean = false;
   @StorageLink('interruptionEpoch') @Watch('onInterrupted') private interruptionEpoch: number = 0;
+
+  @State private winWidth: number = 392;
+  @State private winHeight: number = 800;
+  @State private ui: number = 1;
+  @State private pinUi: number = 1;
+  @State private topBarHeight: number = 0;
 
   @State private storeReady: boolean = false;
   @State private storeError: boolean = false;
@@ -102,6 +114,7 @@ struct Index {
   @State private guestCamera: string = '';
   @State private guestRangeLabel: string = '';
   @State private lockedCount: number = 0;
+  @State private slideFrom: number = 0;
   @State private boundaryAlert: string = '';
 
   private store: AppStore = new AppStore();
@@ -109,6 +122,7 @@ struct Index {
   private boundaryTimer: number = -1;
 
   aboutToAppear(): void {
+    this.measureDisplay();
     this.initialize();
   }
 
@@ -208,12 +222,53 @@ struct Index {
     }
   }
 
-  private pal(): Palette {
-    return this.darkTheme ? DARK : LIGHT;
+  // First estimate before layout; the root Stack's onAreaChange then reports the real window size.
+  private measureDisplay(): void {
+    const screen = this.screenSize();
+    this.onWindowArea(screen[0], screen[1]);
   }
 
-  private cardColor(): string {
-    return this.darkTheme ? DARK.surface : LIGHT.container;
+  // Whole screen in vp. The scale follows the screen, not the window, so it does not jump when the system
+  // bars hide in guest mode.
+  private screenSize(): number[] {
+    try {
+      const screen = display.getDefaultDisplaySync();
+      return [screen.width / screen.densityPixels, screen.height / screen.densityPixels];
+    } catch (error) {
+      return [this.winWidth, this.winHeight];
+    }
+  }
+
+  private onWindowArea(width: number, height: number): void {
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    const screen = this.screenSize();
+    this.winWidth = width;
+    this.winHeight = height;
+    this.ui = uiScale(screen[0], screen[1]);
+    this.pinUi = pinScale(this.ui, height);
+  }
+
+  // Sizes (vp) and font sizes (fp) scaled to the current window.
+  private s(value: number): number {
+    return value * this.ui;
+  }
+
+  // Same for the PIN pad, which also shrinks to fit short screens.
+  private ps(value: number): number {
+    return value * this.pinUi;
+  }
+
+  private presetRows(): PresetOption[][] {
+    if (presetColumns(this.winWidth, this.ui) === 4) {
+      return [PRESETS];
+    }
+    return [PRESETS.slice(0, 2), PRESETS.slice(2)];
+  }
+
+  private pal(): Palette {
+    return this.darkTheme ? DARK : LIGHT;
   }
 
   private keyColor(): string {
@@ -326,6 +381,7 @@ struct Index {
     this.lockedCount = this.photos.length - allowed.length;
     this.guestRangeLabel = this.rangeLabel();
     this.guestIndex = 0;
+    this.slideFrom = 0;
     this.guestZoom = 1;
     this.guestInfoOpen = false;
     this.boundaryAlert = '';
@@ -356,7 +412,17 @@ struct Index {
     return this.guestPhotos[this.guestIndex];
   }
 
+  // The shown photo as a one-item list, so a photo change replays the enter/exit transitions.
+  private guestSlide(): GalleryPhoto[] {
+    return this.guestPhotos.length > 0 ? [this.currentGuest()] : [];
+  }
+
   private showGuestPhoto(index: number): void {
+    if (index === this.guestIndex) {
+      return;
+    }
+    // The next photo slides in from the right, the previous one from the left.
+    this.slideFrom = index > this.guestIndex ? this.s(80) : -this.s(80);
     this.guestIndex = index;
     this.guestZoom = 1;
     this.boundaryAlert = '';
@@ -660,6 +726,19 @@ struct Index {
     }
   }
 
+  // ---- Shared layers ----------------------------------------------------------------------
+
+  // Dim, blurred layer behind dialogs; it fades in and out with them.
+  @Builder
+  private scrim() {
+    Column()
+      .width('100%')
+      .height('100%')
+      .backgroundColor(this.pal().scrim)
+      .backdropBlur(GLASS_BLUR)
+      .transition(TransitionEffect.opacity(0).animation({ duration: FADE_MS }))
+  }
+
   // ---- Owner screen -----------------------------------------------------------------------
 
   @Builder
@@ -667,14 +746,14 @@ struct Index {
     Button({ type: ButtonType.Normal }) {
       SymbolGlyph(isTheme ? (this.darkTheme ? $r('sys.symbol.sun_max') : $r('sys.symbol.moon')) :
         $r('sys.symbol.gearshape'))
-        .fontSize(20)
+        .fontSize(this.s(20))
         .fontColor([isTheme && this.darkTheme ? AMBER : this.pal().text])
     }
-    .width(44)
-    .height(44)
-    .borderRadius(16)
-    .backgroundColor(this.pal().surface)
-    .border({ width: 1, color: this.pal().border })
+    .width(this.s(44))
+    .height(this.s(44))
+    .backgroundColor(this.pal().surfaceGlass)
+    // border() without a radius resets a Button's corner radius.
+    .border({ width: 1, color: this.pal().border, radius: this.s(16) })
     .accessibilityText(isTheme ? (this.darkTheme ? 'Włącz jasny motyw' : 'Włącz ciemny motyw') : 'Ustawienia')
     .onClick(() => isTheme ? this.setDarkTheme(!this.darkTheme) : this.openSettings())
   }
@@ -682,25 +761,25 @@ struct Index {
   @Builder
   private header() {
     Row() {
-      Row({ space: 12 }) {
+      Row({ space: this.s(12) }) {
         Image($r('app.media.app_icon_lock'))
-          .width(40)
-          .height(40)
-          .borderRadius(16)
+          .width(this.s(40))
+          .height(this.s(40))
+          .borderRadius(this.s(16))
           .objectFit(ImageFit.Cover)
           .border({ width: 2, color: this.pal().border })
-        Column({ space: 2 }) {
+        Column({ space: this.s(2) }) {
           Text('SafeShare')
-            .fontSize(16)
+            .fontSize(this.s(16))
             .fontWeight(FontWeight.Bold)
             .fontColor(this.pal().text)
-          Row({ space: 6 }) {
+          Row({ space: this.s(6) }) {
             Circle()
-              .width(8)
-              .height(8)
+              .width(this.s(8))
+              .height(this.s(8))
               .fill(EMERALD)
             Text('Galeria telefonu')
-              .fontSize(12)
+              .fontSize(this.s(12))
               .fontColor(this.pal().textMuted)
           }
         }
@@ -709,71 +788,75 @@ struct Index {
 
       Blank()
 
-      Row({ space: 8 }) {
+      Row({ space: this.s(8) }) {
         this.headerButton(true)
         this.headerButton(false)
       }
     }
     .width('100%')
-    .height(64)
-    .padding({ left: 16, right: 16 })
-    .backgroundColor(this.pal().container)
+    .height(this.s(64))
+    .padding({ left: this.s(16), right: this.s(16) })
     .border({ width: { bottom: 1 }, color: this.pal().border })
   }
 
   @Builder
   private presetButton(option: PresetOption) {
     Row() {
-      Row({ space: 10 }) {
+      Row({ space: this.s(10) }) {
         SymbolGlyph(option.icon)
-          .fontSize(20)
+          .fontSize(this.s(20))
           .fontColor([option.iconColor])
         Column() {
           Text(option.label)
-            .fontSize(14)
+            .fontSize(this.s(14))
             .fontWeight(FontWeight.Bold)
             .fontColor(this.preset === option.key ? this.pal().onPrimary : this.pal().text)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(option.subtitle)
-            .fontSize(10)
-            .margin({ top: 2 })
+            .fontSize(this.s(10))
+            .margin({ top: this.s(2) })
             .fontColor(this.preset === option.key ? this.pal().selectedSubtitle : this.pal().textMuted)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
         }
+        .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
       }
-
-      Blank()
+      .layoutWeight(1)
 
       if (this.preset === option.key) {
         Circle()
-          .width(10)
-          .height(10)
+          .width(this.s(10))
+          .height(this.s(10))
           .fill(EMERALD)
       }
     }
     .layoutWeight(1)
-    .height(58)
-    .padding(12)
-    .borderRadius(16)
-    .backgroundColor(this.preset === option.key ? this.pal().primary : this.pal().surface)
+    .height(this.s(58))
+    .padding(this.s(12))
+    .borderRadius(this.s(16))
+    .backgroundColor(this.preset === option.key ? this.pal().primary : this.pal().surfaceGlass)
     .border({ width: 1, color: this.preset === option.key ? this.pal().primary : this.pal().border })
+    .animation({ duration: 150 })
     .onClick(() => this.selectPreset(option.key))
   }
 
   @Builder
   private dateField(isStart: boolean) {
-    Column({ space: 4 }) {
+    Column({ space: this.s(4) }) {
       Text(isStart ? 'Data początkowa (OD)' : 'Data końcowa (DO)')
-        .fontSize(12)
+        .fontSize(this.s(12))
         .fontColor(this.pal().textMuted)
       Text(formatDay(isStart ? this.customStart : this.customEnd))
         .width('100%')
-        .height(44)
-        .padding({ left: 12, right: 12 })
-        .fontSize(14)
+        .height(this.s(44))
+        .padding({ left: this.s(12), right: this.s(12) })
+        .fontSize(this.s(14))
         .fontWeight(FontWeight.Medium)
         .fontColor(this.pal().text)
         .backgroundColor(this.pal().container)
-        .borderRadius(12)
+        .borderRadius(this.s(12))
         .border({ width: 1, color: this.pal().border })
         .onClick(() => this.pickDate(isStart))
     }
@@ -783,69 +866,69 @@ struct Index {
 
   @Builder
   private countChip(visible: boolean) {
-    Row({ space: 6 }) {
+    Row({ space: this.s(6) }) {
       SymbolGlyph(visible ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
-        .fontSize(14)
+        .fontSize(this.s(14))
         .fontColor([visible ? this.pal().okText : this.pal().warnText])
       Text(visible ? `${this.allowedCount()} widocznych` : `${this.photos.length - this.allowedCount()} ukrytych`)
-        .fontSize(12)
+        .fontSize(this.s(12))
         .fontWeight(FontWeight.Medium)
         .fontColor(visible ? this.pal().okText : this.pal().warnText)
     }
-    .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-    .borderRadius(8)
+    .padding({ left: this.s(10), right: this.s(10), top: this.s(4), bottom: this.s(4) })
+    .borderRadius(this.s(8))
     .backgroundColor(visible ? this.pal().okBg : this.pal().warnBg)
     .border({ width: 1, color: visible ? this.pal().okBorder : this.pal().warnBorder })
   }
 
   @Builder
   private filterBar() {
-    Column({ space: 14 }) {
-      Column({ space: 8 }) {
+    Column({ space: this.s(14) }) {
+      Column({ space: this.s(8) }) {
         Text('OKRES ZDJĘĆ DO POKAZANIA:')
           .width('100%')
-          .fontSize(11)
+          .fontSize(this.s(11))
           .fontWeight(FontWeight.Bold)
           .letterSpacing(0.6)
           .fontColor(this.pal().textMuted)
-        ForEach(PRESET_ROWS, (row: PresetOption[]) => {
-          Row({ space: 10 }) {
+        ForEach(this.presetRows(), (row: PresetOption[]) => {
+          Row({ space: this.s(10) }) {
             ForEach(row, (option: PresetOption) => {
               this.presetButton(option)
             }, (option: PresetOption) => option.key)
           }
           .width('100%')
-        }, (row: PresetOption[]) => row[0].key)
+        }, (row: PresetOption[]) => `${row[0].key}-${row.length}`)
       }
 
       if (this.preset === 'custom') {
-        Column({ space: 12 }) {
-          Row({ space: 8 }) {
+        Column({ space: this.s(12) }) {
+          Row({ space: this.s(8) }) {
             SymbolGlyph($r('sys.symbol.calendar'))
-              .fontSize(16)
+              .fontSize(this.s(16))
               .fontColor(['#0EA5E9'])
             Text('Wskaż zakres dat (OD - DO):')
-              .fontSize(12)
+              .fontSize(this.s(12))
               .fontWeight(FontWeight.Medium)
               .fontColor(this.pal().text)
           }
           .width('100%')
 
-          Row({ space: 12 }) {
+          Row({ space: this.s(12) }) {
             this.dateField(true)
             this.dateField(false)
           }
           .width('100%')
-
         }
-        .padding(16)
-        .borderRadius(16)
-        .backgroundColor(this.pal().surface)
+        .padding(this.s(16))
+        .borderRadius(this.s(16))
+        .backgroundColor(this.pal().surfaceGlass)
         .border({ width: 1, color: this.pal().border })
+        .transition(TransitionEffect.opacity(0).animation({ duration: 150 }))
       }
 
       Row() {
-        Row({ space: 8 }) {
+        Row({ space: this.s(8) }) {
           this.countChip(true)
           this.countChip(false)
         }
@@ -853,58 +936,56 @@ struct Index {
         Blank()
 
         Text(this.rangeLabel())
-          .fontSize(12)
+          .fontSize(this.s(12))
           .fontFamily('monospace')
           .fontColor(this.pal().textMuted)
       }
       .width('100%')
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
-    .backgroundColor(this.pal().container)
-    .border({ width: { bottom: 1 }, color: this.pal().border })
+    .padding({ left: this.s(16), right: this.s(16), top: this.s(14), bottom: this.s(14) })
   }
 
   @Builder
   private notice(text: string) {
     Text(text)
       .width('100%')
-      .padding(12)
-      .fontSize(13)
+      .padding(this.s(12))
+      .fontSize(this.s(13))
       .fontColor(this.pal().errorText)
       .backgroundColor(this.pal().errorBg)
-      .borderRadius(12)
+      .borderRadius(this.s(12))
   }
 
   @Builder
   private galleryMessage(title: string, body: string, action: string, onAction: () => void) {
-    Column({ space: 12 }) {
+    Column({ space: this.s(12) }) {
       SymbolGlyph($r('sys.symbol.lock'))
-        .fontSize(32)
+        .fontSize(this.s(32))
         .fontColor([AMBER])
       Text(title)
-        .fontSize(18)
+        .fontSize(this.s(18))
         .fontWeight(FontWeight.Bold)
         .fontColor(this.pal().text)
       Text(body)
-        .fontSize(13)
-        .lineHeight(19)
+        .fontSize(this.s(13))
+        .lineHeight(this.s(19))
         .textAlign(TextAlign.Center)
         .fontColor(this.pal().textMuted)
       if (action.length > 0) {
         Button(action)
-          .height(44)
-          .padding({ left: 20, right: 20 })
-          .fontSize(14)
+          .height(this.s(44))
+          .padding({ left: this.s(20), right: this.s(20) })
+          .fontSize(this.s(14))
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().onPrimary)
           .backgroundColor(this.pal().primary)
           .onClick(onAction)
       }
     }
-    .layoutWeight(1)
     .width('100%')
-    .padding(32)
+    .height('100%')
+    .padding({ left: this.s(32), right: this.s(32), top: this.topBarHeight, bottom: this.s(100) })
     .justifyContent(FlexAlign.Center)
   }
 
@@ -924,12 +1005,12 @@ struct Index {
         Column() {
           Column() {
             SymbolGlyph($r('sys.symbol.lock_fill'))
-              .fontSize(12)
+              .fontSize(this.s(12))
               .fontColor(['#E6FFFFFF'])
           }
-          .width(24)
-          .height(24)
-          .borderRadius(12)
+          .width(this.s(24))
+          .height(this.s(24))
+          .borderRadius(this.s(12))
           .justifyContent(FlexAlign.Center)
           .backgroundColor('#99000000')
         }
@@ -941,11 +1022,12 @@ struct Index {
     }
     .width('100%')
     .aspectRatio(1)
-    .borderRadius(12)
+    .borderRadius(this.s(12))
     .clip(true)
     .backgroundColor(this.pal().surface)
     .border({ width: 1, color: this.pal().border })
     .opacity(this.isAllowed(photo) ? 1 : 0.4)
+    .animation({ duration: 200 })
     .accessibilityText(this.isAllowed(photo) ? photo.title : `${photo.title}, zablokowane`)
     .onClick(() => this.openDetail(index))
   }
@@ -953,16 +1035,18 @@ struct Index {
   @Builder
   private galleryBody() {
     if (this.access === Access.LOADING) {
-      Column({ space: 12 }) {
+      Column({ space: this.s(12) }) {
         LoadingProgress()
-          .width(40)
-          .height(40)
+          .width(this.s(40))
+          .height(this.s(40))
           .color(this.pal().textMuted)
         Text('Wczytywanie galerii…')
-          .fontSize(13)
+          .fontSize(this.s(13))
           .fontColor(this.pal().textMuted)
       }
-      .layoutWeight(1)
+      .width('100%')
+      .height('100%')
+      .padding({ top: this.topBarHeight })
       .justifyContent(FlexAlign.Center)
     } else if (this.access === Access.DENIED) {
       this.galleryMessage('Brak dostępu do galerii',
@@ -974,64 +1058,76 @@ struct Index {
     } else if (this.photos.length === 0) {
       this.galleryMessage('Brak zdjęć w galerii', 'Zrób zdjęcie aparatem albo skopiuj zdjęcia na telefon.', '', () => {})
     } else {
-      Grid() {
+      // The photos scroll underneath the translucent header and the hand-off button.
+      List({ space: this.s(8) }) {
         ForEach(this.photos, (photo: GalleryPhoto, index: number) => {
-          GridItem() {
+          ListItem() {
             this.photoTile(photo, index)
           }
         }, (photo: GalleryPhoto) => photo.uri)
       }
-      .columnsTemplate('1fr 1fr 1fr')
-      .columnsGap(8)
-      .rowsGap(8)
-      .padding({ left: 12, right: 12, top: 12, bottom: 100 })
+      .width('100%')
+      .height('100%')
+      .lanes(gridColumns(this.winWidth, this.ui), this.s(8))
+      .contentStartOffset(this.topBarHeight + this.s(12))
+      .contentEndOffset(this.s(110))
+      .padding({ left: this.s(12), right: this.s(12) })
       .scrollBar(BarState.Off)
-      .layoutWeight(1)
     }
   }
 
   @Builder
   private handOffButton() {
-    Row() {
+    Column() {
       Button({ type: ButtonType.Normal }) {
-        Row({ space: 12 }) {
+        Row({ space: this.s(12) }) {
           Column() {
             SymbolGlyph($r('sys.symbol.lock_fill'))
-              .fontSize(16)
+              .fontSize(this.s(16))
               .fontColor([AMBER])
           }
-          .width(32)
-          .height(32)
-          .borderRadius(12)
+          .width(this.s(32))
+          .height(this.s(32))
+          .borderRadius(this.s(12))
           .justifyContent(FlexAlign.Center)
           .backgroundColor('#33FBBF24')
 
           Text(`Zablokuj i przekaż telefon (${this.allowedCount()})`)
-            .fontSize(14)
+            .fontSize(this.s(14))
             .fontWeight(FontWeight.Bold)
             .fontColor(this.pal().onPrimary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
 
           SymbolGlyph($r('sys.symbol.arrow_right'))
-            .fontSize(16)
+            .fontSize(this.s(16))
             .fontColor([this.pal().onPrimary])
         }
+        .padding({ left: this.s(12), right: this.s(12) })
       }
       .width('100%')
-      .height(60)
-      .borderRadius(16)
+      .height(this.s(60))
+      .borderRadius(this.s(16))
       .backgroundColor(this.pal().primary)
-      .shadow({ radius: 24, color: '#66000000', offsetY: 8 })
+      .shadow({ radius: this.s(24), color: '#59000000', offsetY: this.s(8) })
       .enabled(this.canHandOff())
       .opacity(this.canHandOff() ? 1 : 0.4)
       .onClick(() => this.startHandOff())
     }
     .width('100%')
-    .padding({ left: 16, right: 16, bottom: 20 })
+    .constraintSize({ maxWidth: this.s(560) })
+    .padding({ left: this.s(16), right: this.s(16), top: this.s(28), bottom: this.s(20) })
+    .linearGradient({
+      direction: GradientDirection.Bottom,
+      colors: [[this.pal().fadeFrom, 0], [this.pal().fadeTo, 0.55]]
+    })
   }
 
   @Builder
   private ownerScreen() {
     Stack({ alignContent: Alignment.Bottom }) {
+      this.galleryBody()
+
       Column() {
         this.header()
         this.filterBar()
@@ -1039,35 +1135,41 @@ struct Index {
           Column() {
             this.notice('Pamięć aplikacji jest niedostępna. Tryb gościa jest zablokowany.')
           }
-          .padding({ left: 16, right: 16, top: 12 })
+          .padding({ left: this.s(16), right: this.s(16), bottom: this.s(12) })
         } else if (!this.privacyReady) {
           Column() {
             this.notice('Nie udało się włączyć ochrony okna przed zrzutami ekranu. Tryb gościa jest zablokowany.')
           }
-          .padding({ left: 16, right: 16, top: 12 })
+          .padding({ left: this.s(16), right: this.s(16), bottom: this.s(12) })
         }
-        this.galleryBody()
       }
       .width('100%')
-      .height('100%')
-      .backgroundColor(this.pal().container)
+      .position({ x: 0, y: 0 })
+      .backgroundColor(this.pal().glass)
+      .backdropBlur(GLASS_BLUR)
+      .border({ width: { bottom: 1 }, color: this.pal().border })
+      .onAreaChange((oldValue: Area, newValue: Area) => {
+        this.topBarHeight = Number(newValue.height);
+      })
 
       this.handOffButton()
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(this.pal().container)
+    .transition(TransitionEffect.opacity(0).animation({ duration: SCREEN_FADE_MS, curve: Curve.EaseInOut }))
   }
 
   // ---- Photo detail overlay ---------------------------------------------------------------
 
   @Builder
   private infoRow(icon: Resource, text: string) {
-    Row({ space: 8 }) {
+    Row({ space: this.s(8) }) {
       SymbolGlyph(icon)
-        .fontSize(14)
+        .fontSize(this.s(14))
         .fontColor([this.pal().textMuted])
       Text(text)
-        .fontSize(12)
+        .fontSize(this.s(12))
         .fontColor(this.pal().textMuted)
         .layoutWeight(1)
     }
@@ -1084,52 +1186,54 @@ struct Index {
             .aspectRatio(4 / 3)
             .objectFit(ImageFit.Cover)
             .sourceSize({ width: 1200, height: 900 })
-            .backgroundColor('#000000')
+            .backgroundColor(this.pal().surface)
             .draggable(false)
 
           Row() {
-            Row({ space: 4 }) {
+            Row({ space: this.s(4) }) {
               SymbolGlyph(this.isAllowed(photo) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
-                .fontSize(12)
+                .fontSize(this.s(12))
                 .fontColor([this.isAllowed(photo) ? '#FFFFFF' : AMBER])
               Text(this.isAllowed(photo) ? 'Dostępne dla gościa' : 'Zablokowane')
-                .fontSize(10)
+                .fontSize(this.s(10))
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.isAllowed(photo) ? '#FFFFFF' : '#D4D4D8')
             }
-            .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+            .padding({ left: this.s(10), right: this.s(10), top: this.s(4), bottom: this.s(4) })
             .borderRadius(999)
-            .backgroundColor(this.isAllowed(photo) ? '#E610B981' : '#E618181B')
+            .backgroundColor(this.isAllowed(photo) ? '#CC10B981' : '#B318181B')
+            .backdropBlur(GLASS_BLUR)
 
             Blank()
 
             Button({ type: ButtonType.Circle }) {
               SymbolGlyph($r('sys.symbol.xmark'))
-                .fontSize(16)
+                .fontSize(this.s(16))
                 .fontColor(['#FFFFFF'])
             }
-            .width(32)
-            .height(32)
-            .backgroundColor('#99000000')
+            .width(this.s(32))
+            .height(this.s(32))
+            .backgroundColor('#73000000')
+            .backdropBlur(GLASS_BLUR)
             .accessibilityText('Zamknij')
             .onClick(() => this.detailIndex = -1)
           }
           .width('100%')
-          .padding(12)
+          .padding(this.s(12))
         }
 
-        Column({ space: 12 }) {
-          Column({ space: 2 }) {
+        Column({ space: this.s(12) }) {
+          Column({ space: this.s(2) }) {
             Text(photo.title)
               .width('100%')
-              .fontSize(16)
+              .fontSize(this.s(16))
               .fontWeight(FontWeight.Bold)
               .fontColor(this.pal().text)
               .maxLines(2)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
             Text(formatDateTime(photo.takenAt))
               .width('100%')
-              .fontSize(11)
+              .fontSize(this.s(11))
               .fontFamily('monospace')
               .fontColor(this.pal().textMuted)
           }
@@ -1137,12 +1241,12 @@ struct Index {
           Divider()
             .color(this.pal().border)
           this.infoRow($r('sys.symbol.picture'), `${photo.width} × ${photo.height} px`)
-          Row({ space: 8 }) {
+          Row({ space: this.s(8) }) {
             SymbolGlyph($r('sys.symbol.camera'))
-              .fontSize(14)
+              .fontSize(this.s(14))
               .fontColor([this.pal().textMuted])
             Text(this.detailCamera.length > 0 ? this.detailCamera : 'Brak danych o aparacie')
-              .fontSize(12)
+              .fontSize(this.s(12))
               .fontColor(this.pal().textMuted)
               .layoutWeight(1)
           }
@@ -1153,31 +1257,34 @@ struct Index {
           Row() {
             Blank()
             Button('Zamknij')
-              .height(32)
-              .padding({ left: 16, right: 16 })
-              .fontSize(12)
+              .height(this.s(32))
+              .padding({ left: this.s(16), right: this.s(16) })
+              .fontSize(this.s(12))
               .fontWeight(FontWeight.Medium)
               .fontColor(this.pal().text)
-              .backgroundColor(this.darkTheme ? DARK.surfaceHover : LIGHT.surface)
+              .backgroundColor(this.keyColor())
               .onClick(() => this.detailIndex = -1)
           }
           .width('100%')
         }
-        .padding(16)
+        .padding(this.s(16))
       }
       .width('92%')
-      .constraintSize({ maxWidth: 400 })
-      .borderRadius(24)
+      .constraintSize({ maxWidth: this.s(420) })
+      .borderRadius(this.s(24))
       .clip(true)
-      .backgroundColor(this.cardColor())
+      .backgroundColor(this.pal().sheet)
+      .backdropBlur(GLASS_BLUR)
       .border({ width: 1, color: this.pal().border })
       .onClick(() => {})
     }
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('#BF000000')
     .onClick(() => this.detailIndex = -1)
+    .transition(TransitionEffect.opacity(0)
+      .animation({ duration: FADE_MS, curve: Curve.FastOutSlowIn })
+      .combine(TransitionEffect.scale({ x: 0.92, y: 0.92 })))
   }
 
   // ---- Settings overlay -------------------------------------------------------------------
@@ -1186,7 +1293,7 @@ struct Index {
   private sectionLabel(text: string) {
     Text(text)
       .width('100%')
-      .fontSize(12)
+      .fontSize(this.s(12))
       .fontWeight(FontWeight.Bold)
       .letterSpacing(0.6)
       .fontColor(this.pal().textMuted)
@@ -1194,65 +1301,66 @@ struct Index {
 
   @Builder
   private themeCard(dark: boolean) {
-    Column({ space: 10 }) {
+    Column({ space: this.s(10) }) {
       Column() {
         SymbolGlyph(dark ? $r('sys.symbol.moon') : $r('sys.symbol.sun_max'))
-          .fontSize(24)
+          .fontSize(this.s(24))
           .fontColor([dark ? '#38BDF8' : '#F59E0B'])
       }
-      .width(40)
-      .height(40)
-      .borderRadius(12)
+      .width(this.s(40))
+      .height(this.s(40))
+      .borderRadius(this.s(12))
       .justifyContent(FlexAlign.Center)
       .backgroundColor(dark ? '#660C4A6E' : '#FEF3C7')
 
-      Column({ space: 2 }) {
+      Column({ space: this.s(2) }) {
         Text(dark ? 'Ciemny motyw' : 'Jasny motyw')
-          .fontSize(14)
+          .fontSize(this.s(14))
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().text)
         Text(dark ? 'Czerń OLED' : 'Czysta biel')
-          .fontSize(11)
+          .fontSize(this.s(11))
           .fontColor(this.pal().textMuted)
       }
 
       if (this.darkTheme === dark) {
         Text('Aktywny')
-          .fontSize(10)
+          .fontSize(this.s(10))
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().okText)
           .backgroundColor(this.pal().okBg)
-          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
+          .padding({ left: this.s(8), right: this.s(8), top: this.s(2), bottom: this.s(2) })
           .borderRadius(999)
       }
     }
     .layoutWeight(1)
-    .padding(16)
-    .borderRadius(16)
-    .backgroundColor(this.darkTheme === dark ? this.pal().surfaceHover : this.pal().container)
+    .padding(this.s(16))
+    .borderRadius(this.s(16))
+    .backgroundColor(this.darkTheme === dark ? this.pal().surfaceHover : this.pal().surfaceGlass)
     .border({ width: 2, color: this.darkTheme === dark ? this.pal().primary : this.pal().border })
     .onClick(() => this.setDarkTheme(dark))
   }
 
   @Builder
   private pinField(isCurrent: boolean) {
-    Column({ space: 4 }) {
+    Column({ space: this.s(4) }) {
       Text(isCurrent ? 'Obecny PIN:' : 'Nowy PIN:')
-        .fontSize(11)
+        .fontSize(this.s(11))
         .fontWeight(FontWeight.Medium)
         .fontColor(this.pal().textMuted)
       TextInput({ text: isCurrent ? this.currentPinInput : this.newPinInput, placeholder: '4 cyfry' })
         .type(InputType.NUMBER_PASSWORD)
         .maxLength(PIN_LENGTH)
         .showPasswordIcon(false)
-        .height(48)
+        .height(this.s(48))
         .textAlign(TextAlign.Center)
-        .fontSize(16)
+        .fontSize(this.s(16))
         .fontWeight(FontWeight.Bold)
         .fontColor(this.pal().text)
         .placeholderColor(this.pal().textMuted)
+        .placeholderFont({ size: this.s(14) })
         .backgroundColor(this.pal().container)
-        .borderRadius(12)
+        .borderRadius(this.s(12))
         .border({ width: 2, color: this.pal().border })
         .onChange((value: string) => {
           if (isCurrent) {
@@ -1268,31 +1376,33 @@ struct Index {
 
   @Builder
   private settingToggle(isLeaveAlarm: boolean) {
-    Row({ space: 12 }) {
-      Column({ space: 2 }) {
+    Row({ space: this.s(12) }) {
+      Column({ space: this.s(2) }) {
         Text(isLeaveAlarm ? 'Alarm przy próbie wyjścia z aplikacji' : 'Ukryj szczegóły zdjęcia')
           .width('100%')
-          .fontSize(14)
+          .fontSize(this.s(14))
           .fontWeight(FontWeight.Bold)
           .fontColor(this.pal().text)
         Text(isLeaveAlarm ?
           'Blokuje ekran kodem PIN natychmiast, gdy gość wróci do ekranu głównego, przełączy aplikację lub ją zminimalizuje.' :
           'Gość oglądający zdjęcia nie zobaczy modelu aparatu ani rozdzielczości.')
           .width('100%')
-          .fontSize(12)
-          .lineHeight(17)
+          .fontSize(this.s(12))
+          .lineHeight(this.s(17))
           .fontColor(this.pal().textMuted)
       }
       .layoutWeight(1)
 
       Toggle({ type: ToggleType.Switch, isOn: isLeaveAlarm ? this.preventLeave : !this.showDetails })
+        .width(this.s(44))
+        .height(this.s(26))
         .selectedColor(AMBER)
         .onChange((isOn: boolean) => isLeaveAlarm ? this.setPreventLeave(isOn) : this.setShowDetails(!isOn))
     }
     .width('100%')
-    .padding(14)
-    .borderRadius(16)
-    .backgroundColor(this.pal().surface)
+    .padding(this.s(14))
+    .borderRadius(this.s(16))
+    .backgroundColor(this.pal().surfaceGlass)
     .border({ width: 1, color: this.pal().border })
   }
 
@@ -1300,13 +1410,13 @@ struct Index {
   private settingsSheet() {
     Column() {
       Row() {
-        Column({ space: 2 }) {
+        Column({ space: this.s(2) }) {
           Text('Ustawienia aplikacji')
-            .fontSize(18)
+            .fontSize(this.s(18))
             .fontWeight(FontWeight.Bold)
             .fontColor(this.pal().text)
           Text('Personalizacja wyglądu i ochrona PIN')
-            .fontSize(12)
+            .fontSize(this.s(12))
             .fontColor(this.pal().textMuted)
         }
         .alignItems(HorizontalAlign.Start)
@@ -1315,38 +1425,38 @@ struct Index {
 
         Button({ type: ButtonType.Circle }) {
           SymbolGlyph($r('sys.symbol.xmark'))
-            .fontSize(22)
+            .fontSize(this.s(22))
             .fontColor([this.pal().textMuted])
         }
-        .width(40)
-        .height(40)
+        .width(this.s(40))
+        .height(this.s(40))
         .backgroundColor(Color.Transparent)
         .accessibilityText('Zamknij')
         .onClick(() => this.settingsOpen = false)
       }
       .width('100%')
-      .padding({ bottom: 16 })
+      .padding({ bottom: this.s(16) })
       .border({ width: { bottom: 1 }, color: this.pal().border })
 
       Scroll() {
-        Column({ space: 24 }) {
-          Column({ space: 12 }) {
+        Column({ space: this.s(24) }) {
+          Column({ space: this.s(12) }) {
             this.sectionLabel('1. WYBIERZ MOTYW KOLORYSTYCZNY')
-            Row({ space: 12 }) {
+            Row({ space: this.s(12) }) {
               this.themeCard(false)
               this.themeCard(true)
             }
             .width('100%')
           }
 
-          Column({ space: 12 }) {
+          Column({ space: this.s(12) }) {
             Row() {
-              Row({ space: 8 }) {
+              Row({ space: this.s(8) }) {
                 SymbolGlyph($r('sys.symbol.key'))
-                  .fontSize(16)
+                  .fontSize(this.s(16))
                   .fontColor([AMBER])
                 Text('2. Kod PIN do odblokowania')
-                  .fontSize(14)
+                  .fontSize(this.s(14))
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.pal().text)
               }
@@ -1354,12 +1464,12 @@ struct Index {
               Blank()
 
               Text(this.pinConfigured ? 'Ustawiony' : 'Nieustawiony')
-                .fontSize(11)
+                .fontSize(this.s(11))
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.pinConfigured ? this.pal().okText : this.pal().warnText)
                 .backgroundColor(this.pinConfigured ? this.pal().okBg : this.pal().warnBg)
-                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-                .borderRadius(8)
+                .padding({ left: this.s(8), right: this.s(8), top: this.s(4), bottom: this.s(4) })
+                .borderRadius(this.s(8))
             }
             .width('100%')
 
@@ -1367,11 +1477,11 @@ struct Index {
               'Ten 4-cyfrowy kod jest wymagany do opuszczenia trybu gościa i powrotu do pełnej galerii.' :
               'Ustaw 4-cyfrowy kod. Będzie wymagany do opuszczenia trybu gościa.')
               .width('100%')
-              .fontSize(12)
-              .lineHeight(17)
+              .fontSize(this.s(12))
+              .lineHeight(this.s(17))
               .fontColor(this.pal().textMuted)
 
-            Row({ space: 12 }) {
+            Row({ space: this.s(12) }) {
               if (this.pinConfigured) {
                 this.pinField(true)
               }
@@ -1382,51 +1492,51 @@ struct Index {
             if (this.settingsError.length > 0) {
               Text(this.settingsError)
                 .width('100%')
-                .padding(10)
-                .fontSize(12)
+                .padding(this.s(10))
+                .fontSize(this.s(12))
                 .fontColor(this.pal().errorText)
                 .backgroundColor(this.pal().errorBg)
-                .borderRadius(12)
+                .borderRadius(this.s(12))
             }
             if (this.settingsSuccess.length > 0) {
               Text(this.settingsSuccess)
                 .width('100%')
-                .padding(10)
-                .fontSize(12)
+                .padding(this.s(10))
+                .fontSize(this.s(12))
                 .fontColor(this.pal().okText)
                 .backgroundColor(this.pal().okBg)
-                .borderRadius(12)
+                .borderRadius(this.s(12))
             }
 
             Button('Zapisz nowy kod PIN')
               .width('100%')
-              .height(48)
-              .borderRadius(12)
-              .fontSize(14)
+              .height(this.s(48))
+              .borderRadius(this.s(12))
+              .fontSize(this.s(14))
               .fontWeight(FontWeight.Bold)
               .fontColor(this.pal().onPrimary)
               .backgroundColor(this.pal().primary)
               .onClick(() => this.changePin())
           }
-          .padding(16)
-          .borderRadius(16)
-          .backgroundColor(this.pal().surface)
+          .padding(this.s(16))
+          .borderRadius(this.s(16))
+          .backgroundColor(this.pal().surfaceGlass)
           .border({ width: 1, color: this.pal().border })
 
-          Column({ space: 12 }) {
+          Column({ space: this.s(12) }) {
             this.sectionLabel('3. ZABEZPIECZENIA W TRYBIE GOŚCIA')
             this.settingToggle(true)
             this.settingToggle(false)
           }
 
-          Column({ space: 12 }) {
+          Column({ space: this.s(12) }) {
             Row() {
-              Row({ space: 10 }) {
+              Row({ space: this.s(10) }) {
                 SymbolGlyph($r('sys.symbol.exclamationmark_triangle'))
-                  .fontSize(18)
+                  .fontSize(this.s(18))
                   .fontColor([AMBER])
                 Text('Ograniczenia systemu OpenHarmony')
-                  .fontSize(14)
+                  .fontSize(this.s(14))
                   .fontWeight(FontWeight.Bold)
                   .fontColor(this.pal().warnText)
               }
@@ -1434,14 +1544,15 @@ struct Index {
               Blank()
 
               SymbolGlyph($r('sys.symbol.chevron_right'))
-                .fontSize(18)
+                .fontSize(this.s(18))
                 .fontColor([this.pal().warnText])
                 .rotate({ angle: this.guideOpen ? 90 : 0 })
+                .animation({ duration: 150 })
             }
             .width('100%')
-            .padding(16)
-            .borderRadius(16)
-            .backgroundColor(this.pal().warnBg)
+            .padding(this.s(16))
+            .borderRadius(this.s(16))
+            .backgroundColor(this.pal().warnGlass)
             .border({ width: 1, color: this.pal().warnBorder })
             .onClick(() => this.guideOpen = !this.guideOpen)
 
@@ -1452,17 +1563,18 @@ struct Index {
                 'w jednej aplikacji (tryb kiosku) wymaga urządzenia zarządzanego przez administratora (Enterprise Device ' +
                 'Management).')
                 .width('100%')
-                .padding(16)
-                .fontSize(12)
-                .lineHeight(18)
+                .padding(this.s(16))
+                .fontSize(this.s(12))
+                .lineHeight(this.s(18))
                 .fontColor(this.pal().textMuted)
-                .backgroundColor(this.pal().surface)
-                .borderRadius(16)
+                .backgroundColor(this.pal().surfaceGlass)
+                .borderRadius(this.s(16))
                 .border({ width: 1, color: this.pal().border })
+                .transition(TransitionEffect.opacity(0).animation({ duration: 150 }))
             }
           }
         }
-        .padding({ top: 20, bottom: 20 })
+        .padding({ top: this.s(20), bottom: this.s(20) })
       }
       .layoutWeight(1)
       .scrollBar(BarState.Off)
@@ -1470,9 +1582,9 @@ struct Index {
 
       Button('Gotowe')
         .width('100%')
-        .height(56)
-        .borderRadius(16)
-        .fontSize(16)
+        .height(this.s(56))
+        .borderRadius(this.s(16))
+        .fontSize(this.s(16))
         .fontWeight(FontWeight.Bold)
         .fontColor(this.pal().onPrimary)
         .backgroundColor(this.pal().primary)
@@ -1480,9 +1592,12 @@ struct Index {
     }
     .width('100%')
     .height('90%')
-    .padding(24)
-    .borderRadius({ topLeft: 24, topRight: 24 })
-    .backgroundColor(this.cardColor())
+    .constraintSize({ maxWidth: this.s(560) })
+    .padding(this.s(24))
+    .borderRadius({ topLeft: this.s(24), topRight: this.s(24) })
+    .backgroundColor(this.pal().sheet)
+    .backdropBlur(GLASS_BLUR)
+    .border({ width: { top: 1 }, color: this.pal().border })
     .onClick(() => {})
   }
 
@@ -1494,8 +1609,9 @@ struct Index {
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.End)
-    .backgroundColor('#99000000')
     .onClick(() => this.settingsOpen = false)
+    .transition(TransitionEffect.move(TransitionEdge.BOTTOM)
+      .animation({ duration: 320, curve: Curve.FastOutSlowIn }))
   }
 
   // ---- Guest screen -----------------------------------------------------------------------
@@ -1505,14 +1621,14 @@ struct Index {
     Button({ type: ButtonType.Normal }) {
       SymbolGlyph(isZoom ? (this.guestZoom > 1 ? $r('sys.symbol.minus_magnifyingglass') :
         $r('sys.symbol.plus_magnifyingglass')) : $r('sys.symbol.info_circle'))
-        .fontSize(20)
-        .fontColor(['#D4D4D8'])
+        .fontSize(this.s(20))
+        .fontColor([this.pal().viewerText])
     }
-    .width(44)
-    .height(44)
-    .borderRadius(16)
-    .backgroundColor('#CC18181B')
-    .border({ width: 1, color: '#993F3F46' })
+    .width(this.s(44))
+    .height(this.s(44))
+    .backgroundColor(this.pal().viewerGlass)
+    .backdropBlur(GLASS_BLUR)
+    .border({ width: 1, color: this.pal().viewerBorder, radius: this.s(16) })
     .accessibilityText(isZoom ? 'Przybliż / oddal zdjęcie' : 'Informacje o zdjęciu')
     .onClick(() => {
       if (isZoom) {
@@ -1526,43 +1642,44 @@ struct Index {
   @Builder
   private guestTopBar() {
     Row() {
-      Row({ space: 6 }) {
+      Row({ space: this.s(6) }) {
         SymbolGlyph($r('sys.symbol.lock_fill'))
-          .fontSize(14)
+          .fontSize(this.s(14))
           .fontColor([AMBER])
         Text(`Tryb Gościa: ${this.guestIndex + 1} / ${this.guestPhotos.length}`)
-          .fontSize(12)
+          .fontSize(this.s(12))
           .fontWeight(FontWeight.Medium)
-          .fontColor('#FCD34D')
+          .fontColor(this.pal().warnText)
       }
-      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+      .padding({ left: this.s(12), right: this.s(12), top: this.s(6), bottom: this.s(6) })
       .borderRadius(999)
-      .backgroundColor('#33F59E0B')
+      .backgroundColor(this.pal().warnGlass)
+      .backdropBlur(GLASS_BLUR)
       .border({ width: 1, color: '#66F59E0B' })
 
       Blank()
 
-      Row({ space: 8 }) {
+      Row({ space: this.s(8) }) {
         this.guestIconButton(true)
         if (this.showDetails) {
           this.guestIconButton(false)
         }
         Button({ type: ButtonType.Normal }) {
-          Row({ space: 8 }) {
+          Row({ space: this.s(8) }) {
             SymbolGlyph($r('sys.symbol.lock_fill'))
-              .fontSize(16)
+              .fontSize(this.s(16))
               .fontColor([AMBER])
             Text('Wyjdź (PIN)')
-              .fontSize(12)
+              .fontSize(this.s(12))
               .fontWeight(FontWeight.Bold)
-              .fontColor('#FFFFFF')
+              .fontColor(this.pal().viewerText)
           }
         }
-        .height(44)
-        .padding({ left: 16, right: 16 })
-        .borderRadius(16)
-        .backgroundColor('#E618181B')
-        .border({ width: 1, color: '#3F3F46' })
+        .height(this.s(44))
+        .padding({ left: this.s(16), right: this.s(16) })
+        .backgroundColor(this.pal().viewerGlass)
+        .backdropBlur(GLASS_BLUR)
+        .border({ width: 1, color: this.pal().viewerBorder, radius: this.s(16) })
         .onClick(() => {
           hapticTap();
           this.openPin(PinMode.EXIT, '');
@@ -1570,24 +1687,25 @@ struct Index {
       }
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 16, bottom: 28 })
+    .padding({ left: this.s(16), right: this.s(16), top: this.s(16), bottom: this.s(32) })
     .linearGradient({
       direction: GradientDirection.Bottom,
-      colors: [['#E6000000', 0], ['#80000000', 0.5], ['#00000000', 1]]
+      colors: [[this.pal().viewerFade, 0], [this.pal().viewerFadeClear, 1]]
     })
   }
 
   @Builder
   private guestThumb(photo: GalleryPhoto, index: number) {
     Image(photo.uri)
-      .width(48)
-      .height(48)
+      .width(this.s(48))
+      .height(this.s(48))
       .objectFit(ImageFit.Cover)
-      .sourceSize({ width: 96, height: 96 })
-      .borderRadius(8)
+      .sourceSize({ width: 128, height: 128 })
+      .borderRadius(this.s(8))
       .border({ width: 2, color: index === this.guestIndex ? AMBER : Color.Transparent })
-      .opacity(index === this.guestIndex ? 1 : 0.5)
+      .opacity(index === this.guestIndex ? 1 : 0.55)
       .scale({ x: index === this.guestIndex ? 1.05 : 1, y: index === this.guestIndex ? 1.05 : 1 })
+      .animation({ duration: 200 })
       .draggable(false)
       .onClick(() => {
         hapticTap();
@@ -1597,68 +1715,69 @@ struct Index {
 
   @Builder
   private guestFooter() {
-    Column({ space: 8 }) {
-      Row({ space: 8 }) {
-        Column({ space: 2 }) {
+    Column({ space: this.s(8) }) {
+      Row({ space: this.s(8) }) {
+        Column({ space: this.s(2) }) {
           Text(this.currentGuest().title)
             .width('100%')
-            .fontSize(14)
+            .fontSize(this.s(14))
             .fontWeight(FontWeight.Medium)
-            .fontColor('#FFFFFF')
+            .fontColor(this.pal().viewerText)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
           Text(this.showDetails ?
             `${formatDateTime(this.currentGuest().takenAt)} · ${this.currentGuest().width}×${this.currentGuest().height}` :
             formatDateTime(this.currentGuest().takenAt))
             .width('100%')
-            .fontSize(11)
+            .fontSize(this.s(11))
             .fontFamily('monospace')
-            .fontColor('#94A3B8')
+            .fontColor(this.pal().viewerMuted)
             .maxLines(1)
         }
         .layoutWeight(1)
 
         Text(`Okres: ${this.guestRangeLabel}`)
-          .fontSize(11)
+          .fontSize(this.s(11))
           .fontWeight(FontWeight.Medium)
-          .fontColor(EMERALD)
-          .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-          .borderRadius(4)
-          .backgroundColor('#99022C22')
-          .border({ width: 1, color: '#4D10B981' })
+          .fontColor(this.pal().okText)
+          .padding({ left: this.s(8), right: this.s(8), top: this.s(2), bottom: this.s(2) })
+          .borderRadius(this.s(6))
+          .backgroundColor(this.pal().okBg)
+          .border({ width: 1, color: this.pal().okBorder })
       }
       .width('100%')
 
       if (this.guestPhotos.length > 1) {
         Scroll() {
-          Row({ space: 6 }) {
+          Row({ space: this.s(6) }) {
             ForEach(this.guestPhotos, (photo: GalleryPhoto, index: number) => {
               this.guestThumb(photo, index)
             }, (photo: GalleryPhoto) => photo.uri)
 
             Column() {
               SymbolGlyph($r('sys.symbol.lock_fill'))
-                .fontSize(16)
-                .fontColor(['#CCFBBF24'])
+                .fontSize(this.s(16))
+                .fontColor([this.pal().warnText])
               Text(`+${this.lockedCount}`)
-                .fontSize(9)
+                .fontSize(this.s(9))
                 .fontWeight(FontWeight.Bold)
                 .fontFamily('monospace')
-                .fontColor('#CCFBBF24')
+                .fontColor(this.pal().warnText)
             }
-            .width(48)
-            .height(48)
-            .borderRadius(8)
+            .width(this.s(48))
+            .height(this.s(48))
+            .borderRadius(this.s(8))
             .justifyContent(FlexAlign.Center)
-            .backgroundColor('#E60F172A')
-            .border({ width: 1, color: '#66F59E0B', style: BorderStyle.Dashed })
+            .backgroundColor(this.pal().viewerGlass)
+            .backdropBlur(GLASS_BLUR)
+            .border({ width: 1, color: '#80F59E0B', style: BorderStyle.Dashed })
             .accessibilityText('Pozostałe zdjęcia w galerii są zablokowane')
             .onClick(() => {
               hapticAlarm();
               this.showBoundary(`${this.lockedCount} pozostałych prywatnych zdjęć jest zablokowane.`);
             })
           }
-          .padding({ top: 4, bottom: 4, left: 2, right: 2 })
+          .padding({ top: this.s(4), bottom: this.s(4), left: this.s(2), right: this.s(2) })
         }
         .width('100%')
         .scrollable(ScrollDirection.Horizontal)
@@ -1667,108 +1786,104 @@ struct Index {
       }
     }
     .width('100%')
-    .padding({ left: 16, right: 16, top: 32, bottom: 24 })
+    .padding({ left: this.s(16), right: this.s(16), top: this.s(36), bottom: this.s(24) })
     .linearGradient({
       direction: GradientDirection.Top,
-      colors: [['#F2000000', 0], ['#CC000000', 0.5], ['#00000000', 1]]
+      colors: [[this.pal().viewerFade, 0], [this.pal().viewerFade, 0.4], [this.pal().viewerFadeClear, 1]]
     })
+  }
+
+  @Builder
+  private guestInfoRow(icon: Resource, color: string, text: string) {
+    Row({ space: this.s(8) }) {
+      SymbolGlyph(icon)
+        .fontSize(this.s(16))
+        .fontColor([color])
+      Text(text)
+        .fontSize(this.s(12))
+        .fontColor(this.pal().text)
+        .layoutWeight(1)
+    }
+    .width('100%')
   }
 
   @Builder
   private guestInfoOverlay() {
     Column() {
-      Column({ space: 10 }) {
+      Column({ space: this.s(10) }) {
         Row() {
           Text('Metadane zdjęcia')
-            .fontSize(14)
+            .fontSize(this.s(14))
             .fontWeight(FontWeight.Medium)
-            .fontColor('#FFFFFF')
+            .fontColor(this.pal().text)
           Blank()
           Button({ type: ButtonType.Circle }) {
             SymbolGlyph($r('sys.symbol.xmark'))
-              .fontSize(16)
-              .fontColor(['#94A3B8'])
+              .fontSize(this.s(16))
+              .fontColor([this.pal().textMuted])
           }
-          .width(32)
-          .height(32)
+          .width(this.s(32))
+          .height(this.s(32))
           .backgroundColor(Color.Transparent)
           .onClick(() => this.guestInfoOpen = false)
         }
         .width('100%')
-        .padding({ bottom: 10 })
-        .border({ width: { bottom: 1 }, color: '#1E293B' })
+        .padding({ bottom: this.s(10) })
+        .border({ width: { bottom: 1 }, color: this.pal().border })
 
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.calendar'))
-            .fontSize(16)
-            .fontColor([AMBER])
-          Text(formatDateTime(this.currentGuest().takenAt))
-            .fontSize(12)
-            .fontColor('#E2E8F0')
-        }
-        .width('100%')
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.picture'))
-            .fontSize(16)
-            .fontColor(['#38BDF8'])
-          Text(`${this.currentGuest().width} × ${this.currentGuest().height} px`)
-            .fontSize(12)
-            .fontColor('#E2E8F0')
-        }
-        .width('100%')
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.camera'))
-            .fontSize(16)
-            .fontColor([EMERALD])
-          Text(this.guestCamera.length > 0 ? this.guestCamera : 'Brak danych o aparacie')
-            .fontSize(12)
-            .fontColor('#E2E8F0')
-        }
-        .width('100%')
+        this.guestInfoRow($r('sys.symbol.calendar'), AMBER, formatDateTime(this.currentGuest().takenAt))
+        this.guestInfoRow($r('sys.symbol.picture'), '#38BDF8',
+          `${this.currentGuest().width} × ${this.currentGuest().height} px`)
+        this.guestInfoRow($r('sys.symbol.camera'), EMERALD,
+          this.guestCamera.length > 0 ? this.guestCamera : 'Brak danych o aparacie')
       }
       .width('90%')
-      .constraintSize({ maxWidth: 380 })
-      .padding(20)
-      .borderRadius(16)
-      .backgroundColor('#0F172A')
-      .border({ width: 1, color: '#1E293B' })
+      .constraintSize({ maxWidth: this.s(380) })
+      .padding(this.s(20))
+      .borderRadius(this.s(16))
+      .backgroundColor(this.pal().sheet)
+      .backdropBlur(GLASS_BLUR)
+      .border({ width: 1, color: this.pal().border })
+      .onClick(() => {})
     }
     .width('100%')
     .height('100%')
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('#CC000000')
     .onClick(() => this.guestInfoOpen = false)
+    .transition(TransitionEffect.opacity(0)
+      .animation({ duration: FADE_MS, curve: Curve.FastOutSlowIn })
+      .combine(TransitionEffect.scale({ x: 0.94, y: 0.94 })))
   }
 
   @Builder
   private guestLocked() {
-    Column({ space: 12 }) {
+    Column({ space: this.s(12) }) {
       Column() {
         SymbolGlyph($r('sys.symbol.lock_fill'))
-          .fontSize(32)
+          .fontSize(this.s(32))
           .fontColor([AMBER])
       }
-      .width(64)
-      .height(64)
-      .borderRadius(16)
+      .width(this.s(64))
+      .height(this.s(64))
+      .borderRadius(this.s(16))
       .justifyContent(FlexAlign.Center)
-      .backgroundColor('#1AF59E0B')
+      .backgroundColor(this.pal().warnGlass)
       .border({ width: 1, color: '#4DF59E0B' })
 
       Text('Galeria jest zablokowana')
-        .fontSize(20)
+        .fontSize(this.s(20))
         .fontWeight(FontWeight.Bold)
-        .fontColor('#FFFFFF')
+        .fontColor(this.pal().text)
       Text('Sesja gościa została przerwana. Pozostałe zdjęcia są ukryte do czasu podania kodu PIN właściciela.')
-        .fontSize(14)
-        .lineHeight(20)
+        .fontSize(this.s(14))
+        .lineHeight(this.s(20))
         .textAlign(TextAlign.Center)
-        .fontColor('#94A3B8')
+        .fontColor(this.pal().textMuted)
       Button('Odblokuj galerię (kod PIN)')
-        .height(40)
-        .padding({ left: 24, right: 24 })
-        .margin({ top: 12 })
-        .fontSize(12)
+        .height(this.s(40))
+        .padding({ left: this.s(24), right: this.s(24) })
+        .margin({ top: this.s(12) })
+        .fontSize(this.s(12))
         .fontWeight(FontWeight.Bold)
         .fontColor('#020617')
         .backgroundColor(AMBER)
@@ -1777,9 +1892,10 @@ struct Index {
     }
     .width('100%')
     .height('100%')
-    .padding(24)
+    .padding(this.s(24))
     .justifyContent(FlexAlign.Center)
-    .backgroundColor('#020617')
+    .backgroundColor(this.pal().container)
+    .transition(TransitionEffect.opacity(0).animation({ duration: SCREEN_FADE_MS, curve: Curve.EaseInOut }))
   }
 
   @Builder
@@ -1788,20 +1904,43 @@ struct Index {
       this.guestLocked()
     } else {
       Stack() {
-        Stack() {
-          Image(this.currentGuest().uri)
+        // Instead of black bars around the photo: a blurred, tinted copy of the photo fills the screen.
+        ForEach(this.guestSlide(), (photo: GalleryPhoto) => {
+          Image(photo.uri)
             .width('100%')
             .height('100%')
-            .objectFit(ImageFit.Contain)
-            .sourceSize({ width: 1600, height: 1600 })
-            .scale({ x: this.guestZoom, y: this.guestZoom })
-            .animation({ duration: 300, curve: Curve.EaseOut })
-            .privacySensitive(true)
+            .objectFit(ImageFit.Cover)
+            .sourceSize({ width: 64, height: 64 })
+            .blur(AMBIENT_BLUR)
             .draggable(false)
+            .transition(TransitionEffect.opacity(0).animation({ duration: 400 }))
+        }, (photo: GalleryPhoto) => photo.uri)
+
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor(this.pal().viewerScrim)
+
+        Stack() {
+          ForEach(this.guestSlide(), (photo: GalleryPhoto) => {
+            Image(photo.uri)
+              .width('100%')
+              .height('100%')
+              .objectFit(ImageFit.Contain)
+              .sourceSize({ width: 1600, height: 1600 })
+              .scale({ x: this.guestZoom, y: this.guestZoom })
+              .animation({ duration: 300, curve: Curve.EaseOut })
+              .privacySensitive(true)
+              .draggable(false)
+              .transition(TransitionEffect.asymmetric(
+                TransitionEffect.opacity(0)
+                  .animation({ duration: 280, curve: Curve.FastOutSlowIn })
+                  .combine(TransitionEffect.translate({ x: this.slideFrom })),
+                TransitionEffect.opacity(0).animation({ duration: 200 })))
+          }, (photo: GalleryPhoto) => photo.uri)
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#000000')
         .gesture(
           GestureGroup(GestureMode.Exclusive,
             TapGesture({ count: 2 })
@@ -1815,22 +1954,23 @@ struct Index {
           this.guestTopBar()
           Blank()
           if (this.boundaryAlert.length > 0) {
-            Row({ space: 10 }) {
+            Row({ space: this.s(10) }) {
               SymbolGlyph($r('sys.symbol.lock_fill'))
-                .fontSize(16)
+                .fontSize(this.s(16))
                 .fontColor([AMBER])
               Text(this.boundaryAlert)
-                .fontSize(12)
-                .lineHeight(17)
-                .fontColor('#FDE68A')
+                .fontSize(this.s(12))
+                .lineHeight(this.s(17))
+                .fontColor(this.pal().warnText)
                 .layoutWeight(1)
             }
-            .margin({ left: 16, right: 16, bottom: 12 })
-            .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-            .borderRadius(12)
-            .backgroundColor('#E6451A03')
+            .margin({ left: this.s(16), right: this.s(16), bottom: this.s(12) })
+            .padding({ left: this.s(16), right: this.s(16), top: this.s(10), bottom: this.s(10) })
+            .borderRadius(this.s(12))
+            .backgroundColor(this.pal().warnGlass)
+            .backdropBlur(GLASS_BLUR)
             .border({ width: 1, color: '#80F59E0B' })
-            .transition(TransitionEffect.OPACITY.animation({ duration: 200 }))
+            .transition(TransitionEffect.opacity(0).animation({ duration: 200 }))
           }
           this.guestFooter()
         }
@@ -1839,12 +1979,16 @@ struct Index {
         .hitTestBehavior(HitTestMode.Transparent)
 
         if (this.guestInfoOpen) {
+          this.scrim()
           this.guestInfoOverlay()
         }
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('#000000')
+      .backgroundColor(this.pal().container)
+      .transition(TransitionEffect.opacity(0)
+        .animation({ duration: SCREEN_FADE_MS, curve: Curve.EaseInOut })
+        .combine(TransitionEffect.scale({ x: 1.04, y: 1.04 })))
     }
   }
 
@@ -1854,145 +1998,155 @@ struct Index {
   private pinKey(digit: string) {
     Button({ type: ButtonType.Circle }) {
       Text(digit)
-        .fontSize(26)
+        .fontSize(this.ps(26))
         .fontWeight(FontWeight.Bold)
         .fontFamily('monospace')
         .fontColor(this.pal().text)
     }
-    .width(72)
-    .height(72)
+    .width(this.ps(72))
+    .height(this.ps(72))
     .backgroundColor(this.keyColor())
     .onClick(() => this.pressDigit(digit))
   }
 
   @Builder
   private pinOverlay() {
-    Column() {
-      Stack({ alignContent: Alignment.TopEnd }) {
-        Column() {
+    Scroll() {
+      Column() {
+        Stack({ alignContent: Alignment.TopEnd }) {
           Column() {
-            SymbolGlyph(this.isPanicPin() ? $r('sys.symbol.exclamationmark_triangle') : $r('sys.symbol.lock'))
-              .fontSize(28)
-              .fontColor([this.isPanicPin() ? DANGER : this.pal().text])
-          }
-          .width(56)
-          .height(56)
-          .borderRadius(16)
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor(this.isPanicPin() ? '#1AEF4444' : this.keyColor())
-          .border({ width: this.isPanicPin() ? 1 : 0, color: '#33EF4444' })
-          .margin({ bottom: 14 })
-
-          Text(this.pinTitle())
-            .fontSize(18)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(this.pal().text)
-            .margin({ bottom: 4 })
-          Text(this.pinSubtitle())
-            .fontSize(12)
-            .lineHeight(18)
-            .textAlign(TextAlign.Center)
-            .fontColor(this.pal().textMuted)
-            .constraintSize({ maxWidth: 270 })
-            .margin({ bottom: 24 })
-
-          Row({ space: 16 }) {
-            ForEach(PIN_SLOTS, (slot: number) => {
-              Circle()
-                .width(16)
-                .height(16)
-                .fill(this.pinEntry.length > slot ? (this.pinError ? DANGER : this.pal().text) : this.keyColor())
-                .scale({ x: this.pinEntry.length > slot ? 1.25 : 1, y: this.pinEntry.length > slot ? 1.25 : 1 })
-                .animation({ duration: 150 })
-            }, (slot: number) => slot.toString())
-          }
-          .margin({ bottom: 12 })
-
-          Text(this.pinFeedback)
-            .height(18)
-            .fontSize(11)
-            .fontColor(DANGER)
-            .margin({ bottom: 12 })
-
-          Column({ space: 14 }) {
-            ForEach(KEYPAD_ROWS, (row: string[]) => {
-              Row({ space: 18 }) {
-                ForEach(row, (digit: string) => {
-                  this.pinKey(digit)
-                }, (digit: string) => digit)
-              }
-            }, (row: string[]) => row[0])
-
-            Row({ space: 18 }) {
-              Column()
-                .width(72)
-                .height(72)
-              this.pinKey('0')
-              Button({ type: ButtonType.Circle }) {
-                SymbolGlyph($r('sys.symbol.delete_left'))
-                  .fontSize(22)
-                  .fontColor([this.pal().textMuted])
-              }
-              .width(72)
-              .height(72)
-              .backgroundColor(Color.Transparent)
-              .accessibilityText('Usuń cyfrę')
-              .onClick(() => this.deleteDigit())
+            Column() {
+              SymbolGlyph(this.isPanicPin() ? $r('sys.symbol.exclamationmark_triangle') : $r('sys.symbol.lock'))
+                .fontSize(this.ps(28))
+                .fontColor([this.isPanicPin() ? DANGER : this.pal().text])
             }
-          }
+            .width(this.ps(56))
+            .height(this.ps(56))
+            .borderRadius(this.ps(16))
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor(this.isPanicPin() ? '#1AEF4444' : this.keyColor())
+            .border({ width: this.isPanicPin() ? 1 : 0, color: '#33EF4444' })
+            .margin({ bottom: this.ps(14) })
 
-          Text('Zapomniałeś kodu PIN?')
-            .fontSize(11)
-            .fontColor(this.pal().textMuted)
-            .margin({ top: 16 })
-            .onClick(() => this.pinHintOpen = !this.pinHintOpen)
-          if (this.pinHintOpen) {
-            Text('Kodu nie da się odzyskać. Aby go zresetować, wyczyść dane aplikacji SafeShare w Ustawieniach systemu.')
-              .margin({ top: 6 })
-              .padding(8)
-              .fontSize(11)
-              .lineHeight(16)
+            Text(this.pinTitle())
+              .fontSize(this.ps(18))
+              .fontWeight(FontWeight.Bold)
+              .fontColor(this.pal().text)
+              .margin({ bottom: this.ps(4) })
+            Text(this.pinSubtitle())
+              .fontSize(this.ps(12))
+              .lineHeight(this.ps(18))
               .textAlign(TextAlign.Center)
               .fontColor(this.pal().textMuted)
-              .backgroundColor(this.keyColor())
-              .borderRadius(8)
-          }
-          if (this.pinAttempts > 0) {
-            Text(`Błędnych prób: ${this.pinAttempts}`)
-              .margin({ top: 4 })
-              .fontSize(10)
-              .fontFamily('monospace')
-              .fontColor(DANGER)
-          }
-        }
-        .width('100%')
-        .alignItems(HorizontalAlign.Center)
+              .constraintSize({ maxWidth: this.ps(270) })
+              .margin({ bottom: this.ps(24) })
 
-        if (this.isPinCancelable()) {
-          Button({ type: ButtonType.Circle }) {
-            SymbolGlyph($r('sys.symbol.xmark'))
-              .fontSize(22)
-              .fontColor([this.pal().textMuted])
+            Row({ space: this.ps(16) }) {
+              ForEach(PIN_SLOTS, (slot: number) => {
+                Circle()
+                  .width(this.ps(16))
+                  .height(this.ps(16))
+                  .fill(this.pinEntry.length > slot ? (this.pinError ? DANGER : this.pal().text) : this.keyColor())
+                  .scale({ x: this.pinEntry.length > slot ? 1.25 : 1, y: this.pinEntry.length > slot ? 1.25 : 1 })
+                  .animation({ duration: 150 })
+              }, (slot: number) => slot.toString())
+            }
+            .margin({ bottom: this.ps(12) })
+
+            Text(this.pinFeedback)
+              .height(this.ps(18))
+              .fontSize(this.ps(11))
+              .fontColor(DANGER)
+              .margin({ bottom: this.ps(12) })
+
+            Column({ space: this.ps(14) }) {
+              ForEach(KEYPAD_ROWS, (row: string[]) => {
+                Row({ space: this.ps(18) }) {
+                  ForEach(row, (digit: string) => {
+                    this.pinKey(digit)
+                  }, (digit: string) => digit)
+                }
+              }, (row: string[]) => row[0])
+
+              Row({ space: this.ps(18) }) {
+                Column()
+                  .width(this.ps(72))
+                  .height(this.ps(72))
+                this.pinKey('0')
+                Button({ type: ButtonType.Circle }) {
+                  SymbolGlyph($r('sys.symbol.delete_left'))
+                    .fontSize(this.ps(22))
+                    .fontColor([this.pal().textMuted])
+                }
+                .width(this.ps(72))
+                .height(this.ps(72))
+                .backgroundColor(Color.Transparent)
+                .accessibilityText('Usuń cyfrę')
+                .onClick(() => this.deleteDigit())
+              }
+            }
+
+            Text('Zapomniałeś kodu PIN?')
+              .fontSize(this.ps(11))
+              .fontColor(this.pal().textMuted)
+              .margin({ top: this.ps(16) })
+              .onClick(() => this.pinHintOpen = !this.pinHintOpen)
+            if (this.pinHintOpen) {
+              Text('Kodu nie da się odzyskać. Aby go zresetować, wyczyść dane aplikacji SafeShare w Ustawieniach systemu.')
+                .margin({ top: this.ps(6) })
+                .padding(this.ps(8))
+                .fontSize(this.ps(11))
+                .lineHeight(this.ps(16))
+                .textAlign(TextAlign.Center)
+                .fontColor(this.pal().textMuted)
+                .backgroundColor(this.keyColor())
+                .borderRadius(this.ps(8))
+            }
+            if (this.pinAttempts > 0) {
+              Text(`Błędnych prób: ${this.pinAttempts}`)
+                .margin({ top: this.ps(4) })
+                .fontSize(this.ps(10))
+                .fontFamily('monospace')
+                .fontColor(DANGER)
+            }
           }
-          .width(40)
-          .height(40)
-          .backgroundColor(Color.Transparent)
-          .accessibilityText('Anuluj')
-          .onClick(() => this.closePin())
+          .width('100%')
+          .alignItems(HorizontalAlign.Center)
+
+          if (this.isPinCancelable()) {
+            Button({ type: ButtonType.Circle }) {
+              SymbolGlyph($r('sys.symbol.xmark'))
+                .fontSize(this.ps(22))
+                .fontColor([this.pal().textMuted])
+            }
+            .width(this.ps(40))
+            .height(this.ps(40))
+            .backgroundColor(Color.Transparent)
+            .accessibilityText('Anuluj')
+            .onClick(() => this.closePin())
+          }
         }
+        .width('92%')
+        .constraintSize({ maxWidth: this.ps(380) })
+        .padding(this.ps(28))
+        .borderRadius(this.ps(24))
+        .backgroundColor(this.pal().sheet)
+        .backdropBlur(GLASS_BLUR)
+        .border({ width: 1, color: this.isPanicPin() ? DANGER : this.pal().border })
+        .shadow({ radius: this.ps(40), color: '#59000000', offsetY: this.ps(12) })
+        .translate({ x: this.shakeOffset })
       }
-      .width('92%')
-      .constraintSize({ maxWidth: 380 })
-      .padding(28)
-      .borderRadius(24)
-      .backgroundColor(this.cardColor())
-      .border({ width: 1, color: this.isPanicPin() ? DANGER : this.pal().border })
-      .translate({ x: this.shakeOffset })
+      .width('100%')
+      .constraintSize({ minHeight: this.winHeight })
+      .justifyContent(FlexAlign.Center)
     }
     .width('100%')
     .height('100%')
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor('#CC000000')
+    .scrollBar(BarState.Off)
+    .edgeEffect(EdgeEffect.None)
+    .transition(TransitionEffect.opacity(0)
+      .animation({ duration: FADE_MS, curve: Curve.FastOutSlowIn })
+      .combine(TransitionEffect.scale({ x: 0.94, y: 0.94 })))
   }
 
   build() {
@@ -2003,17 +2157,23 @@ struct Index {
         this.ownerScreen()
       }
       if (!this.guestMode && this.detailIndex >= 0 && this.detailIndex < this.photos.length) {
+        this.scrim()
         this.detailOverlay(this.photos[this.detailIndex])
       }
       if (!this.guestMode && this.settingsOpen) {
+        this.scrim()
         this.settingsOverlay()
       }
       if (this.pinMode !== PinMode.NONE) {
+        this.scrim()
         this.pinOverlay()
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(this.guestMode ? '#000000' : this.pal().page)
+    .backgroundColor(this.pal().page)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      this.onWindowArea(Number(newValue.width), Number(newValue.height));
+    })
   }
 }

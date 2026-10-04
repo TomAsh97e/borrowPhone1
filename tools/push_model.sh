@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # Copies models/range-parser.gguf straight into the installed app's sandbox (emulator/development),
-# for HAPs built without the bundled model. Run tools/fetch_model.sh first and launch the app once.
+# for HAPs built without the bundled model. Install and launch the app once first.
 set -euo pipefail
 
 HDC="${HDC:-$HOME/setup-ohos-sdk/linux/23/toolchains/hdc}"
 BUNDLE=org.hackyeah.borrowphone
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FILES="/data/app/el2/100/base/$BUNDLE/haps/entry/files"
+
+# Downloads the model only if the clone has no valid copy (e.g. git-lfs was not installed).
+"$ROOT/tools/fetch_model.sh" >/dev/null
 
 OWNER=$("$HDC" shell "stat -c %u:%g $FILES" | tr -d '\r')
 case "$OWNER" in

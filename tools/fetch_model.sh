@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Downloads the on-device period model (Qwen2.5-0.5B-Instruct, Q4_K_M GGUF, Apache-2.0) to models/
-# and verifies its SHA-256. With --bundle it is also copied into the raw-file resources, so the
-# next build packs it into the HAP (needs ~1.2 GB free on the device during install).
+# Makes sure models/ holds the on-device period model (Qwen2.5-0.5B-Instruct, Q4_K_M GGUF,
+# Apache-2.0) with the right SHA-256. The model comes with the clone through Git LFS; it is only
+# downloaded when the file is missing or is an LFS pointer. With --bundle it is also copied into the
+# raw-file resources, so the next build packs it into the HAP (needs ~1.2 GB free on the device
+# during install).
 set -euo pipefail
 
 URL='https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf?download=true'

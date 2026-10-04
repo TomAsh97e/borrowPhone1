@@ -3,7 +3,8 @@ import { window } from '@kit.ArkUI';
 import { formatDateTime, formatDay, formatRangeShort } from '../common/Format';
 import { AMBER, DANGER, DARK, EMERALD, LIGHT, Palette } from '../common/Theme';
 import {
-  dayRange, isInRange, isValidPin, PIN_LENGTH, PresetKey, presetRange, startOfDay, TimeRange
+  dayRange, isInRange, isShared, isValidPin, ManualPicks, PIN_LENGTH, PresetKey, presetRange, startOfDay, TimeRange,
+  togglePick
 } from '../model/SessionRules';
 import { AppStore, PinCheck } from '../service/AppStore';
 import { GalleryPhoto, loadPhotos, readCameraModel, requestGalleryAccess } from '../service/Gallery';
@@ -69,6 +70,7 @@ struct Index {
   @State private preset: PresetKey = 'weekend';
   @State private customStart: number = startOfDay(Date.now());
   @State private customEnd: number = startOfDay(Date.now());
+  @State private picks: ManualPicks = { added: [], removed: [] };
 
   @State private darkTheme: boolean = true;
   @State private preventLeave: boolean = true;
@@ -225,16 +227,43 @@ struct Index {
   }
 
   private isAllowed(photo: GalleryPhoto): boolean {
-    return isInRange(photo.takenAt, this.range());
+    return isShared(photo.uri, isInRange(photo.takenAt, this.range()), this.picks);
+  }
+
+  private isManual(photo: GalleryPhoto): boolean {
+    return this.isAllowed(photo) !== isInRange(photo.takenAt, this.range());
   }
 
   private allowedPhotos(): GalleryPhoto[] {
     const range = this.range();
-    return this.photos.filter((photo: GalleryPhoto) => isInRange(photo.takenAt, range));
+    return this.photos.filter((photo: GalleryPhoto) => isShared(photo.uri, isInRange(photo.takenAt, range), this.picks));
   }
 
   private allowedCount(): number {
     return this.allowedPhotos().length;
+  }
+
+  // Only picks that change something in the current period count.
+  private manualCount(added: boolean): number {
+    const range = this.range();
+    return this.photos.filter((photo: GalleryPhoto) => {
+      const inRange = isInRange(photo.takenAt, range);
+      return inRange !== added && isShared(photo.uri, inRange, this.picks) === added;
+    }).length;
+  }
+
+  private hasManualPicks(): boolean {
+    return this.manualCount(true) + this.manualCount(false) > 0;
+  }
+
+  private togglePhoto(photo: GalleryPhoto): void {
+    hapticTap();
+    this.picks = togglePick(photo.uri, isInRange(photo.takenAt, this.range()), this.picks);
+  }
+
+  private resetPicks(): void {
+    hapticTap();
+    this.picks = { added: [], removed: [] };
   }
 
   private rangeLabel(): string {
@@ -324,7 +353,7 @@ struct Index {
     }
     this.guestPhotos = allowed;
     this.lockedCount = this.photos.length - allowed.length;
-    this.guestRangeLabel = this.rangeLabel();
+    this.guestRangeLabel = this.manualCount(true) > 0 ? `${this.rangeLabel()} + wybrane` : this.rangeLabel();
     this.guestIndex = 0;
     this.guestZoom = 1;
     this.guestInfoOpen = false;
@@ -650,7 +679,16 @@ struct Index {
 
   // ---- Photo detail -----------------------------------------------------------------------
 
+  // Whole photo, between square (portraits) and 16:9, so the card still fits a phone screen.
+  private previewAspect(photo: GalleryPhoto): number {
+    if (photo.width <= 0 || photo.height <= 0) {
+      return 1;
+    }
+    return Math.min(Math.max(photo.width / photo.height, 1), 16 / 9);
+  }
+
   private async openDetail(index: number): Promise<void> {
+    hapticTap();
     this.detailIndex = index;
     this.detailCamera = '';
     const uri = this.photos[index].uri;
@@ -799,6 +837,38 @@ struct Index {
   }
 
   @Builder
+  private picksBar() {
+    Row({ space: 8 }) {
+      SymbolGlyph(this.hasManualPicks() ? $r('sys.symbol.hand_tap') : $r('sys.symbol.info_circle'))
+        .fontSize(14)
+        .fontColor([this.pal().textMuted])
+      Text(this.hasManualPicks() ? `Zmiany ręczne: +${this.manualCount(true)} / −${this.manualCount(false)}` :
+        'Dotknij zdjęcie, aby je pokazać lub ukryć. Przytrzymaj, aby zobaczyć podgląd.')
+        .fontSize(11)
+        .lineHeight(15)
+        .fontColor(this.pal().textMuted)
+        .layoutWeight(1)
+      if (this.hasManualPicks()) {
+        Row({ space: 4 }) {
+          SymbolGlyph($r('sys.symbol.arrow_counterclockwise'))
+            .fontSize(12)
+            .fontColor([this.pal().text])
+          Text('Cofnij zmiany')
+            .fontSize(12)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(this.pal().text)
+        }
+        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+        .borderRadius(8)
+        .backgroundColor(this.pal().surface)
+        .border({ width: 1, color: this.pal().border })
+        .onClick(() => this.resetPicks())
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
   private filterBar() {
     Column({ space: 14 }) {
       Column({ space: 8 }) {
@@ -858,6 +928,8 @@ struct Index {
           .fontColor(this.pal().textMuted)
       }
       .width('100%')
+
+      this.picksBar()
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 14, bottom: 14 })
@@ -910,7 +982,7 @@ struct Index {
 
   @Builder
   private photoTile(photo: GalleryPhoto, index: number) {
-    Stack() {
+    Stack({ alignContent: Alignment.TopEnd }) {
       Image(photo.uri)
         .width('100%')
         .height('100%')
@@ -937,6 +1009,20 @@ struct Index {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .backgroundColor('#40000000')
+      } else {
+        Column() {
+          SymbolGlyph($r('sys.symbol.checkmark'))
+            .fontSize(12)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(['#FFFFFF'])
+        }
+        .width(22)
+        .height(22)
+        .margin(6)
+        .borderRadius(11)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(EMERALD)
+        .border({ width: 1.5, color: '#FFFFFF' })
       }
     }
     .width('100%')
@@ -944,10 +1030,18 @@ struct Index {
     .borderRadius(12)
     .clip(true)
     .backgroundColor(this.pal().surface)
-    .border({ width: 1, color: this.pal().border })
+    .border({ width: this.isManual(photo) ? 2 : 1, color: this.isManual(photo) ? AMBER : this.pal().border })
     .opacity(this.isAllowed(photo) ? 1 : 0.4)
-    .accessibilityText(this.isAllowed(photo) ? photo.title : `${photo.title}, zablokowane`)
-    .onClick(() => this.openDetail(index))
+    .animation({ duration: 150, curve: Curve.EaseOut })
+    .accessibilityText(this.isAllowed(photo) ? `${photo.title}, widoczne dla gościa` : `${photo.title}, ukryte`)
+    .gesture(
+      GestureGroup(GestureMode.Exclusive,
+        LongPressGesture()
+          .onAction(() => this.openDetail(index)),
+        TapGesture()
+          .onAction(() => this.togglePhoto(photo))
+      )
+    )
   }
 
   @Builder
@@ -1081,9 +1175,9 @@ struct Index {
         Stack({ alignContent: Alignment.Top }) {
           Image(photo.uri)
             .width('100%')
-            .aspectRatio(4 / 3)
-            .objectFit(ImageFit.Cover)
-            .sourceSize({ width: 1200, height: 900 })
+            .aspectRatio(this.previewAspect(photo))
+            .objectFit(ImageFit.Contain)
+            .sourceSize({ width: 1200, height: 1200 })
             .backgroundColor('#000000')
             .draggable(false)
 
@@ -1092,7 +1186,8 @@ struct Index {
               SymbolGlyph(this.isAllowed(photo) ? $r('sys.symbol.checkmark_circle_fill') : $r('sys.symbol.lock_fill'))
                 .fontSize(12)
                 .fontColor([this.isAllowed(photo) ? '#FFFFFF' : AMBER])
-              Text(this.isAllowed(photo) ? 'Dostępne dla gościa' : 'Zablokowane')
+              Text((this.isAllowed(photo) ? 'Dostępne dla gościa' : 'Zablokowane') +
+                (this.isManual(photo) ? ' · ręcznie' : ''))
                 .fontSize(10)
                 .fontWeight(FontWeight.Bold)
                 .fontColor(this.isAllowed(photo) ? '#FFFFFF' : '#D4D4D8')
@@ -1151,7 +1246,26 @@ struct Index {
             .color(this.pal().border)
 
           Row() {
+            Button({ type: ButtonType.Normal }) {
+              Row({ space: 6 }) {
+                SymbolGlyph(this.isAllowed(photo) ? $r('sys.symbol.eye_slash') : $r('sys.symbol.eye'))
+                  .fontSize(14)
+                  .fontColor([this.isAllowed(photo) ? this.pal().text : this.pal().onPrimary])
+                Text(this.isAllowed(photo) ? 'Ukryj przed gościem' : 'Pokaż gościowi')
+                  .fontSize(12)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(this.isAllowed(photo) ? this.pal().text : this.pal().onPrimary)
+              }
+            }
+            .height(32)
+            .padding({ left: 14, right: 14 })
+            .borderRadius(16)
+            .backgroundColor(this.isAllowed(photo) ? (this.darkTheme ? DARK.surfaceHover : LIGHT.surface) :
+              this.pal().primary)
+            .onClick(() => this.togglePhoto(photo))
+
             Blank()
+
             Button('Zamknij')
               .height(32)
               .padding({ left: 16, right: 16 })
@@ -1177,6 +1291,7 @@ struct Index {
     .height('100%')
     .justifyContent(FlexAlign.Center)
     .backgroundColor('#BF000000')
+    .transition(TransitionEffect.OPACITY.animation({ duration: 150 }))
     .onClick(() => this.detailIndex = -1)
   }
 

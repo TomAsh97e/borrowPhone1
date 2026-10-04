@@ -4,7 +4,9 @@ SafeShare is a native ArkTS/ArkUI app for OpenHarmony that implements the SafeSh
 
 ## How it works
 
-- **Owner gallery**: every photo in the media library (up to 500, newest first) is shown in a 3-column grid. Photos outside the selected period are dimmed, blurred and marked with a lock. Tapping a photo shows its date, resolution and camera model (EXIF).
+- **Owner gallery**: every photo in the media library (up to 500, newest first) is shown in a 3-column grid. Photos outside the selected period are dimmed, blurred and marked with a lock; shared photos carry a green check.
+- **Manual picks**: tapping a photo shows or hides it on top of the period (a hidden photo from the period, or an extra photo from another day). Hand-picked tiles get an amber border; "Cofnij zmiany" drops all picks. Picks survive a period change and only count where they differ from the period.
+- **Preview**: holding a photo opens a preview with the whole image, its date, resolution and camera model (EXIF), and a "Pokaż gościowi / Ukryj przed gościem" button.
 - **Guest mode**: full-screen viewer with swipe, double-tap zoom, a filmstrip and a "+N" locked tile. Swiping past either end of the period shows a boundary notice instead of other photos.
 - **PIN**: created on the first hand-off, stored as a salted PBKDF2-SHA256 hash in app preferences (never displayed). Five wrong attempts lock PIN entry for 30 seconds. The PIN can be changed in Settings with the current PIN.
 - **Leaving the app**: the system Back button opens the PIN pad. Going to the home screen or another app turns the screen into a non-dismissable PIN lock. If the app is killed during a guest session, the next start opens straight into that lock.
@@ -69,7 +71,7 @@ The gallery needs photos with dates. Copy JPEG/PNG files (their EXIF `DateTimeOr
 
 ## Checks
 
-Run the date-range and PIN rule check:
+Run the date-range, manual-pick and PIN rule check:
 
 ```bash
 node tests/session_rules_test.mjs   # needs Node.js 22.18+ (imports a .ts file)
@@ -82,6 +84,7 @@ Device checks performed on the environment above:
 | Permission prompt, gallery load, 3-column grid with locked photos | Passed |
 | Presets Today / Yesterday / Weekend and custom range (system date dialog) | Passed |
 | Photo detail with EXIF camera model | Passed |
+| Tap to hide / add photos, counters, "Cofnij zmiany", long-press preview with show/hide button | Passed |
 | Light/dark theme incl. system bar colors | Passed |
 | PIN creation with mismatching confirmation, then guest mode | Passed |
 | Guest swipe, boundary notices, filmstrip, zoom, details overlay | Passed |
@@ -99,7 +102,7 @@ Device checks performed on the environment above:
 - `entry/src/main/ets/service/Gallery.ets` — gallery permission, media library query, EXIF camera model.
 - `entry/src/main/ets/service/Haptics.ets` — vibration feedback.
 - `entry/src/main/ets/common/` — theme palettes and Polish date formatting.
-- `entry/src/main/ets/model/SessionRules.ts` — date ranges, PIN format and index rules.
+- `entry/src/main/ets/model/SessionRules.ts` — date ranges, manual picks, PIN format and index rules.
 - `entry/src/main/ets/entryability/EntryAbility.ets` — privacy window and background detection.
 - `tests/session_rules_test.mjs` — runnable lightweight check.
 - [`01_ARCHITECTURE.md`](01_ARCHITECTURE.md) through [`05_HACKATHON_COMPLIANCE.md`](05_HACKATHON_COMPLIANCE.md) — design notes for the earlier picker-based MVP.

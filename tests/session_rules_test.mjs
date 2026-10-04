@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
-  clampIndex, constantTimeEqual, dayRange, isInRange, isValidPin, normalizeTimestamp, presetRange
+  clampIndex, constantTimeEqual, dayRange, isInRange, isShared, isValidPin, normalizeTimestamp, presetRange,
+  togglePick
 } from '../entry/src/main/ets/model/SessionRules.ts';
 
 assert.equal(clampIndex(8, 5), 4);
@@ -31,4 +32,19 @@ assert.equal(isInRange(at('2026-09-21T23:00:00'), reversed), true);
 
 assert.equal(normalizeTimestamp(1790000000), 1790000000000);
 assert.equal(normalizeTimestamp(1790000000000), 1790000000000);
+
+const none = { added: [], removed: [] };
+assert.equal(isShared('a', true, none), true);
+assert.equal(isShared('a', false, none), false);
+const hidden = togglePick('a', true, none);
+assert.deepEqual(hidden, { added: [], removed: ['a'] });
+assert.equal(isShared('a', true, hidden), false);
+assert.deepEqual(togglePick('a', true, hidden), none);
+const picked = togglePick('b', false, none);
+assert.deepEqual(picked, { added: ['b'], removed: [] });
+assert.equal(isShared('b', false, picked), true);
+// Picked outside one period, hidden inside another: the latest choice wins in both.
+const repicked = togglePick('b', true, picked);
+assert.deepEqual(repicked, { added: [], removed: ['b'] });
+assert.equal(isShared('b', false, repicked), false);
 console.log('SessionRules checks passed.');

@@ -62,6 +62,31 @@ export function isInRange(time: number, range: TimeRange): boolean {
   return time >= range.start && time <= range.end;
 }
 
+// Owner's picks on top of the period: `added` photos are shared although outside it,
+// `removed` photos are hidden although inside it.
+export interface ManualPicks {
+  added: string[];
+  removed: string[];
+}
+
+export function isShared(uri: string, inRange: boolean, picks: ManualPicks): boolean {
+  return inRange ? !picks.removed.includes(uri) : picks.added.includes(uri);
+}
+
+// The latest tap wins: the photo is kept only in the list that differs from the period rule.
+export function togglePick(uri: string, inRange: boolean, picks: ManualPicks): ManualPicks {
+  const share = !isShared(uri, inRange, picks);
+  const added = picks.added.filter((item: string) => item !== uri);
+  const removed = picks.removed.filter((item: string) => item !== uri);
+  if (share && !inRange) {
+    added.push(uri);
+  }
+  if (!share && inRange) {
+    removed.push(uri);
+  }
+  return { added: added, removed: removed };
+}
+
 // Media library timestamps are milliseconds; older records may hold seconds.
 export function normalizeTimestamp(value: number): number {
   return value > 0 && value < 100000000000 ? value * 1000 : value;

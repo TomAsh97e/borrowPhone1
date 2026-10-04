@@ -16,4 +16,5 @@ signatures/
 .cxx/
 **/.cxx/
 entry/src/main/resources/rawfile/models/
+/models/*.gguf
 /models/*.part

@@ -8,7 +8,7 @@ BUNDLE=org.hackyeah.borrowphone
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FILES="/data/app/el2/100/base/$BUNDLE/haps/entry/files"
 
-# Downloads the model only if the clone has no valid copy (e.g. git-lfs was not installed).
+# Gets the model through Ollama if models/ does not have it yet.
 "$ROOT/tools/fetch_model.sh" >/dev/null
 
 OWNER=$("$HDC" shell "stat -c %u:%g $FILES" | tr -d '\r')

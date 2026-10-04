@@ -12,7 +12,7 @@ Co zostanie zainstalowane:
 | OpenHarmony SDK 6.1 (API 23) | kompilator ArkTS, natywny toolchain, `hdc` | `~/setup-ohos-sdk/linux/23` |
 | Command-line tools 5.1 | `hvigorw`, `ohpm` | `~/command-line-tools` |
 | Emulator OpenHarmony 7.0 (QEMU, telefon x86_64) | urządzenie, na którym działa aplikacja | `~/.ohos-qemu` |
-| Model Qwen2.5-0.5B (380 MB) | asystent „period in words” | `models/` w repo (pobiera się razem z `git clone` przez Git LFS) |
+| Ollama + model Qwen2.5-0.5B (opcjonalnie) | pobranie modelu dla asystenta „period in words” | Ollama: system; model: `models/` w repo |
 
 ---
 
@@ -20,7 +20,7 @@ Co zostanie zainstalowane:
 
 - Procesor **x86_64** z wirtualizacją (Intel VT-x albo AMD-V) **włączoną w BIOS/UEFI**. Bez KVM emulator też ruszy, ale będzie bardzo wolny.
 - **RAM**: minimum 8 GB, zalecane 16 GB (emulator sam zajmuje 4 GB).
-- **Dysk**: około **25 GB wolnego miejsca** (SDK ≈ 3,7 GB, command-line tools ≈ 7 GB, emulator ≈ 4,7 GB, plus archiwa pobierane w trakcie instalacji i model 0,4 GB).
+- **Dysk**: około **25 GB wolnego miejsca** (SDK ≈ 3,7 GB, command-line tools ≈ 7 GB, emulator ≈ 4,7 GB, plus archiwa pobierane w trakcie instalacji). Opcjonalny asystent AI wymaga jeszcze około 3 GB (Ollama ≈ 2,3 GB i dwie kopie modelu).
 - Internet: w sumie pobiera się kilka GB.
 
 Sprawdzenie:
@@ -37,13 +37,13 @@ df -h ~                               # kolumna "Avail" ≥ 25G
 
 ```bash
 sudo apt update
-sudo apt install -y git git-lfs curl unzip tar coreutils \
+sudo apt install -y git curl unzip tar zstd coreutils \
     openjdk-21-jdk-headless \
     qemu-system-x86 qemu-system-gui qemu-utils \
     cpu-checker
 ```
 
-- `git-lfs` pobiera razem z repozytorium plik modelu AI (380 MB).
+- `zstd` jest potrzebny instalatorowi Ollamy (krok 9).
 - `openjdk-21-jdk-headless` daje `java` i `keytool`, których `oniro-app sign` używa do podpisu.
 - `qemu-system-x86` i `qemu-system-gui` to emulator i jego okno (SDL).
 - `cpu-checker` daje polecenie `kvm-ok`.
@@ -54,7 +54,7 @@ Opcjonalnie, tylko jeśli chcesz uruchamiać test modelu AI na komputerze (krok 
 sudo apt install -y build-essential cmake ninja-build
 ```
 
-> Fedora: `sudo dnf install git git-lfs curl unzip java-21-openjdk-devel qemu-kvm qemu-ui-sdl`.
+> Fedora: `sudo dnf install git curl unzip zstd java-21-openjdk-devel qemu-kvm qemu-ui-sdl`.
 
 ---
 
@@ -182,14 +182,10 @@ Zatrzymanie emulatora: `hdc shell reboot shutdown` albo zamknięcie jego okna.
 ## 7. Pobranie, podpisanie, zbudowanie i uruchomienie projektu
 
 ```bash
-git lfs install                # jednorazowo: włącza Git LFS dla twojego konta
 mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/TomAsh97e/borrowPhone1.git
 cd borrowPhone1
-ls -lh models/range-parser.gguf  # ma mieć ok. 380M
 ```
-
-Jeśli plik modelu ma tylko około 130 bajtów, git-lfs nie był włączony w chwili klonowania. Nie trzeba klonować od nowa: wykonaj `git lfs install && git lfs pull`. Krok 9 i tak pobierze model, jeśli go brakuje.
 
 ### 7.1 Podpis (jednorazowo na danym komputerze)
 
@@ -244,7 +240,28 @@ Zdjęcia pojawią się w aplikacji po jej ponownym otwarciu. **Notatki i PDF-y**
 
 ## 9. Model AI dla „period in words” (opcjonalnie)
 
-Model przyszedł razem z repozytorium (`models/range-parser.gguf`). Bez niego aplikacja działa normalnie, a pole opisu okresu słowami pokazuje tylko komunikat „The AI assistant is unavailable on this device”.
+Bez modelu aplikacja działa normalnie, a pole opisu okresu słowami pokazuje tylko komunikat „The AI assistant is unavailable on this device”. Modelu nie ma w repozytorium. Pobiera się go przez **Ollamę** (`qwen2.5:0.5b`, około 400 MB).
+
+### 9.1 Instalacja Ollamy (jednorazowo)
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama --version
+```
+
+Instalator prosi o hasło `sudo`. Uruchamia Ollamę jako usługę systemową i dodaje twoje konto do grupy `ollama`. Ta grupa zacznie działać po ponownym zalogowaniu.
+
+### 9.2 Pobranie modelu
+
+Z katalogu projektu:
+
+```bash
+tools/fetch_model.sh
+```
+
+Skrypt wykonuje `ollama pull qwen2.5:0.5b`, a potem kopiuje plik modelu (GGUF) z magazynu Ollamy do `models/range-parser.gguf` i sprawdza jego sumę SHA-256. Jeśli po instalacji Ollamy nie było jeszcze ponownego logowania, skrypt poprosi o hasło `sudo`, żeby odczytać plik z katalogu usługi. Gdy model jest już w `models/`, skrypt niczego nie pobiera.
+
+### 9.3 Wgranie modelu na emulator
 
 Na **emulatorze** model wgrywa się bezpośrednio do piaskownicy aplikacji, bo partycja danych jest za mała na wersję z modelem w środku HAP-a. Aplikacja musi być zainstalowana i **raz uruchomiona** (krok 7.3):
 
@@ -258,9 +275,9 @@ Następnie uruchom aplikację od nowa:
 oniro-app app stop org.hackyeah.borrowphone && oniro-app app launch .
 ```
 
-Jeśli w `models/` nie ma prawidłowego pliku (np. przy klonowaniu git-lfs był wyłączony), skrypt najpierw sam pobierze go z Hugging Face i sprawdzi SHA-256.
+Jeśli pominiesz krok 9.2, `push_model.sh` sam go najpierw wykona.
 
-> Na **prawdziwym telefonie** użyj `tools/fetch_model.sh --bundle` (kopiuje model z `models/`) i zbuduj ponownie (`oniro-app build .`). Model trafi wtedy do HAP-a, który urośnie do około 395 MB.
+> Na **prawdziwym telefonie** użyj `tools/fetch_model.sh --bundle` i zbuduj ponownie (`oniro-app build .`). Model trafi wtedy do HAP-a, który urośnie do około 395 MB.
 
 ---
 
@@ -319,5 +336,8 @@ oniro-app app launch .
 | Okna dialogowe pojawiają się z 1,5–3 s opóźnieniem | To normalne na emulatorze przy pierwszym otwarciu. |
 | PDF: „PDF preview is unavailable on this device” | Ograniczenie emulatora x86_64 (ArkWeb tylko dla arm64). Podgląd PDF działa na urządzeniu arm64. |
 | „The AI assistant is unavailable on this device” | Brak modelu w piaskownicy aplikacji. Wykonaj krok 9, a po każdym odinstalowaniu aplikacji powtórz `tools/push_model.sh`. |
+| `fetch_model.sh`: „Ollama is not installed” | Zainstaluj Ollamę (krok 9.1). |
+| `fetch_model.sh`: `could not connect to ollama server` / `Error: … connection refused` | Usługa Ollamy nie działa. Uruchom ją: `sudo systemctl start ollama`. |
+| `fetch_model.sh`: „Warning: qwen2.5:0.5b has changed…” | Ollama opublikowała nową wersję modelu, inną niż sprawdzona testem z kroku 10. Zwykle działa, ale warto uruchomić ten test. |
 | „Today” / „Yesterday” nie obejmują zdjęć demo | Data w emulatorze nie zgadza się z datami plików (4.10.2026), a strefa czasowa emulatora to Asia/Shanghai. Użyj własnego zakresu dat. |
 | Brak miejsca na dysku | Największy jest katalog `~/command-line-tools/sdk` (≈ 6 GB, HarmonyOS SDK niepotrzebny temu projektowi). Można go zastąpić dowiązaniem do toolchainu API 23: `rm -rf ~/command-line-tools/sdk && mkdir -p ~/command-line-tools/sdk/default/openharmony && ln -s ~/setup-ohos-sdk/linux/23/toolchains ~/command-line-tools/sdk/default/openharmony/toolchains`. |

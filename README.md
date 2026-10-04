@@ -85,7 +85,7 @@ The model's JSON is `{"intent":"share","period":"today"|"yesterday"|"weekend"}`,
 
 ### Getting the model
 
-The model is committed with Git LFS as `models/range-parser.gguf` ([source and license](models/README.md)), so it comes with `git clone` when git-lfs is installed (`git lfs install` once). If the clone only has the LFS pointer, `tools/fetch_model.sh` downloads the same file from Hugging Face and checks its SHA-256; `tools/push_model.sh` runs it automatically.
+The model is not committed. With [Ollama](https://ollama.com) installed, `tools/fetch_model.sh` runs `ollama pull qwen2.5:0.5b`, copies the GGUF blob to `models/range-parser.gguf` and checks its SHA-256 ([details](models/README.md)); `tools/push_model.sh` runs it automatically when the file is missing.
 
 - **Phone**: `tools/fetch_model.sh --bundle` also places it in `entry/src/main/resources/rawfile/models/`, so the next build packs it into the HAP (≈ 395 MB). On first use the app copies it into its sandbox.
 - **QEMU emulator**: the 1.3 GB data partition cannot hold the HAP install plus copies, so build without `--bundle`, install and launch the app once, then run `tools/push_model.sh`, which copies the model into the app sandbox with `hdc`.
